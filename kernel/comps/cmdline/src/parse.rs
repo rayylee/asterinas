@@ -8,7 +8,7 @@
 use alloc::vec::Vec;
 use core::{
     str::FromStr,
-    sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering},
+    sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, Ordering},
 };
 
 use spin::Once;
@@ -43,6 +43,13 @@ impl ParamStorage for AtomicU32 {
 impl ParamStorage for AtomicBool {
     type Value = bool;
     fn store_param(&self, value: bool) {
+        self.store(value, Ordering::Relaxed);
+    }
+}
+
+impl ParamStorage for AtomicI32 {
+    type Value = i32;
+    fn store_param(&self, value: i32) {
         self.store(value, Ordering::Relaxed);
     }
 }

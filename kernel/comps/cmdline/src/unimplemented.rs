@@ -47,7 +47,6 @@ define_unimplemented_param!(
     "reboot",
     "pci",
     "debug",
-    "panic",
     "nr_cpus",
     "selinux",
     "initrd",

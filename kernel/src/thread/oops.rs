@@ -12,12 +12,17 @@
 //! exceptions with [`Result`] is more idiomatic.
 
 use alloc::format;
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 
 use ostd::{cpu::PinCurrentCpu, panic, task::disable_preempt, util::id_set::Id};
 
 use super::Thread;
 use crate::prelude::*;
+
+// In Linux, `panic_timeout` controls reboot-on-panic behavior:
+//   0 = power off (default), negative = immediate reboot, positive = reboot after N seconds.
+static PANIC_TIMEOUT: AtomicI32 = AtomicI32::new(0);
+aster_cmdline::define_kv_param!("panic", PANIC_TIMEOUT);
 
 // TODO: Control the kernel commandline parsing from the kernel crate.
 // In Linux it can be dynamically changed by writing to
@@ -56,9 +61,9 @@ where
 
             let count = OOPS_COUNT.fetch_add(1, Ordering::Relaxed);
             if count >= MAX_OOPS_COUNT {
-                // Too many oops. Abort the kernel.
+                // Too many oops. The kernel panics.
                 ostd::error!("Too many oops. The kernel panics.");
-                panic::abort();
+                panic!("Too many oops");
             }
 
             Err(*info)
@@ -120,5 +125,21 @@ fn panic_handler(info: &core::panic::PanicInfo) -> ! {
         ostd::error!("Backtrace is disabled.");
     }
 
-    panic::abort();
+    let panic_timeout = PANIC_TIMEOUT.load(Ordering::Relaxed);
+    match panic_timeout {
+        0 => {
+            // Default: power off
+            panic::abort();
+        }
+        t if t < 0 => {
+            // Negative: reboot immediately
+            ostd::power::restart(ostd::power::ExitCode::Failure);
+        }
+        t => {
+            // Positive: reboot after t seconds
+            ostd::info!("Panic: rebooting in {} seconds...", t);
+            panic::spin_delay_secs(t as u64);
+            ostd::power::restart(ostd::power::ExitCode::Failure);
+        }
+    }
 }

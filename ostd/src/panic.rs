@@ -44,6 +44,22 @@ pub fn abort() -> ! {
     crate::power::poweroff(crate::power::ExitCode::Failure);
 }
 
+/// Spin-waits for the specified number of seconds.
+///
+/// This function is designed for use in panic context where normal
+/// timer/sleep APIs are unavailable. It busy-waits using the TSC.
+pub fn spin_delay_secs(secs: u64) {
+    let freq = crate::arch::tsc_freq();
+    if freq == 0 {
+        return;
+    }
+    let start = crate::arch::read_tsc();
+    let target = freq.saturating_mul(secs);
+    while crate::arch::read_tsc().wrapping_sub(start) < target {
+        core::hint::spin_loop();
+    }
+}
+
 /// A guard that aborts the system if dropped.
 ///
 /// This is useful to ensure that certain objects will not be dropped during
