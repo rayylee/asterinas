@@ -1,0 +1,145 @@
+// SPDX-License-Identifier: MPL-2.0
+
+//! KVM-compatible hypervisor device module.
+//!
+//! Implements `/dev/kvm` and the associated VM and vCPU file descriptors,
+//! providing a Linux KVM-compatible user-space API for hardware virtualization.
+
+mod ioctl;
+mod vm;
+mod vcpu;
+
+use device_id::{DeviceId, MajorId, MinorId};
+use spin::Once;
+use crate::{
+    device::{Device, DeviceType, DevtmpfsInodeMeta, registry::char::{self, MajorIdOwner, acquire_major}},
+    events::IoEvents,
+    fs::{
+        file::{FileIo, StatusFlags},
+        vfs::inode::InodeIo,
+    },
+    prelude::*,
+    process::signal::{PollHandle, Pollable},
+    util::ioctl::{RawIoctl, dispatch_ioctl},
+};
+
+/// KVM API version (matches Linux).
+const KVM_API_VERSION: i32 = 12;
+
+/// Minor number for `/dev/kvm` (matches Linux).
+const KVM_MINOR: u32 = 232;
+
+/// `/dev/kvm` device.
+#[derive(Debug)]
+struct KvmDevice {
+    id: DeviceId,
+}
+
+impl KvmDevice {
+    fn new(major_id: MajorId) -> Arc<Self> {
+        let minor = MinorId::new(KVM_MINOR);
+        let id = DeviceId::new(major_id, minor);
+        Arc::new(Self { id })
+    }
+}
+
+impl Device for KvmDevice {
+    fn type_(&self) -> DeviceType {
+        DeviceType::Char
+    }
+
+    fn id(&self) -> DeviceId {
+        self.id
+    }
+
+    fn devtmpfs_meta(&self) -> Option<DevtmpfsInodeMeta<'_>> {
+        Some(DevtmpfsInodeMeta::new("kvm"))
+    }
+
+    fn open(&self) -> Result<Box<dyn FileIo>> {
+        Ok(Box::new(KvmFile))
+    }
+}
+
+/// A file handle opened from `/dev/kvm`.
+struct KvmFile;
+
+impl Pollable for KvmFile {
+    fn poll(&self, mask: IoEvents, _poller: Option<&mut PollHandle>) -> IoEvents {
+        mask & (IoEvents::IN | IoEvents::OUT)
+    }
+}
+
+impl InodeIo for KvmFile {
+    fn read_at(
+        &self,
+        _offset: usize,
+        _writer: &mut VmWriter,
+        _status_flags: StatusFlags,
+    ) -> Result<usize> {
+        return_errno_with_message!(Errno::EINVAL, "KVM device is not readable")
+    }
+
+    fn write_at(
+        &self,
+        _offset: usize,
+        _reader: &mut VmReader,
+        _status_flags: StatusFlags,
+    ) -> Result<usize> {
+        return_errno_with_message!(Errno::EINVAL, "KVM device is not writable")
+    }
+}
+
+impl FileIo for KvmFile {
+    fn check_seekable(&self) -> Result<()> {
+        return_errno_with_message!(Errno::ESPIPE, "KVM device is not seekable")
+    }
+
+    fn is_offset_aware(&self) -> bool {
+        false
+    }
+
+    fn ioctl(&self, raw_ioctl: RawIoctl) -> Result<i32> {
+        use ioctl::*;
+
+        dispatch_ioctl!(match raw_ioctl {
+            _cmd @ GetApiVersion => {
+                Ok(KVM_API_VERSION)
+            }
+            _cmd @ CreateVm => {
+                let vm = vm::KvmVm::new()?;
+                let fd = vm.register_fd()?;
+                Ok(fd as i32)
+            }
+            cmd @ CheckExtension => {
+                let capability = cmd.get();
+                Ok(check_extension(capability))
+            }
+            _cmd @ GetVcpuMmapSize => {
+                Ok(vcpu::KVM_RUN_SIZE as i32)
+            }
+            _ => return_errno_with_message!(Errno::ENOTTY, "unknown KVM ioctl"),
+        })
+    }
+}
+
+/// Checks a KVM capability.
+fn check_extension(capability: i32) -> i32 {
+    match capability {
+        0 => 0, // KVM_CAP_IRQCHIP - not supported
+        _ => 0,
+    }
+}
+
+/// Initializes the KVM device module.
+///
+/// Registers `/dev/kvm` as a character device with major number 232.
+pub fn init() -> Result<()> {
+    KVM_MAJOR.call_once(|| acquire_major(MajorId::new(232)).unwrap());
+    let major_id = KVM_MAJOR.get().unwrap().get();
+    let device = KvmDevice::new(major_id);
+    char::register(device)?;
+    Ok(())
+}
+
+static KVM_MAJOR: Once<MajorIdOwner> = Once::new();

@@ -2,6 +2,7 @@
 
 mod evdev;
 mod fb;
+pub mod kvm;
 mod mem;
 pub mod misc;
 mod pty;
@@ -167,6 +168,8 @@ pub fn init_in_first_kthread() {
     misc::init_in_first_kthread();
     evdev::init_in_first_kthread();
     fb::init_in_first_kthread();
+    #[cfg(target_arch = "x86_64")]
+    kvm::init().unwrap();
 }
 
 /// Initializes the device nodes in devtmpfs after mounting rootfs.
