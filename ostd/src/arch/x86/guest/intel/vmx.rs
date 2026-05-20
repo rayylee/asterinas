@@ -102,8 +102,7 @@ fn read_vmx_ctl_msr(msr: u32) -> (u32, u32) {
 /// Detects and caches VMX capabilities.
 ///
 /// Must be called once during early init on the BSP.
-#[expect(dead_code)]
-pub(crate) fn detect_vmx_capabilities() -> Result<VmxCapabilities> {
+pub fn detect_vmx_capabilities() -> Result<VmxCapabilities> {
     if !is_vmx_supported() {
         return Err(Error::InvalidArgs);
     }

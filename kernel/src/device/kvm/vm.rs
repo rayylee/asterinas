@@ -7,7 +7,7 @@
 
 use core::fmt::Display;
 
-use ostd::guest::{EptPageFlags, EptPageProperty, GuestPhysMemSpace};
+use ostd::guest::{GuestPageFlags, GuestPageProperty, GuestPhysMemSpace};
 use ostd::task::{disable_preempt, Task};
 
 use crate::{
@@ -73,8 +73,8 @@ impl KvmVm {
 
         // Map each page from the user VmSpace into the guest EPT.
         let preempt_guard = disable_preempt();
-        let prop = EptPageProperty {
-            flags: EptPageFlags::RWX,
+        let prop = GuestPageProperty {
+            flags: GuestPageFlags::RWX,
             mem_type: 6, // WB
         };
 

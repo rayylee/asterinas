@@ -8,6 +8,20 @@
 
 use core::arch::global_asm;
 
+// VMX entry/exit trampoline and host RIP label.
+// These symbols are defined in global_asm! below.
+unsafe extern "C" {
+    /// VM entry/exit trampoline defined in asm.S.
+    ///
+    /// Takes: GuestGprSaveArea ptr, VmxExitInfo ptr, launch_flag (0=vmlaunch, nonzero=vmresume).
+    pub fn __vmx_enter_guest_v2(
+        gpr_save: *mut crate::arch::guest::GuestGprSaveArea,
+        exit_info: *mut u8,
+        launch_flag: u64,
+    ) -> i32;
+
+}
+
 // VMX basic instructions
 global_asm!(
     ".balign 16",
@@ -109,12 +123,9 @@ global_asm!(
     ".size asm_invept, . - asm_invept",
 );
 
-// Final clean implementation
+// VM entry/exit trampoline
 global_asm!(
     ".balign 16",
-    // Remove the broken __vmx_enter_guest symbol
-    // We only use __vmx_enter_guest_v2
-
     ".global __vmx_enter_guest_v2",
     ".type __vmx_enter_guest_v2, @function",
     "__vmx_enter_guest_v2:",
@@ -141,8 +152,6 @@ global_asm!(
     "    vmwrite rdi, rsi",
 
     // Load guest GPRs from save area
-    // rdi was just clobbered (used for vmwrite), but we have the save area ptr
-    // on the stack at [rsp+48]
     "    mov rdi, [rsp + 48]",    // Reload GuestGprSaveArea ptr
     "    mov rax, [rdi + 0]",    // guest rax
     "    mov rbx, [rdi + 8]",    // guest rbx
@@ -172,9 +181,7 @@ global_asm!(
     // If VM entry failed (CF=1 or ZF=1 after vmresume/vmlaunch), we land here
     // because the instruction failed -- no VM exit occurred.
     // But if VM entry succeeded, we never reach here.
-    // If VM entry fails, RSP is still valid.
 
-    // Recover our pointers from stack (guest GPRs are in regs but entry failed)
     "    mov rdi, [rsp + 48]",    // GuestGprSaveArea ptr
     "    mov rsi, [rsp + 40]",    // VmxExitInfo ptr
 
@@ -193,7 +200,6 @@ global_asm!(
     "    mov [rdi + 96], r13",
     "    mov [rdi + 104], r14",
     "    mov [rdi + 112], r15",
-    // guest rdi is gone (we overwrote it), but on failed entry that's OK.
 
     // Write entry failure info
     "    mov eax, 0x4400",       // VM_INSTRUCTION_ERROR
@@ -202,8 +208,8 @@ global_asm!(
 
     // Return failure (1)
     "    mov eax, 1",
-    // Clean up stack (3 pushes for ptrs + 6 callee-saves)
-    "    add rsp, 3*8",           // remove ptrs + launch flag
+    // Clean up stack
+    "    add rsp, 3*8",
     "    pop r15",
     "    pop r14",
     "    pop r13",
@@ -219,21 +225,10 @@ global_asm!(
     "asm_vmx_host_rip:",
     ".Lvmx_exit_handler_v2:",
     // VM exit lands here. CPU has restored HOST_RIP and HOST_RSP from VMCS.
-    // HOST_RSP points to the stack with: launch_flag, VmxExitInfo ptr, GuestGprSaveArea ptr,
-    // then callee-saves.
     // Guest GPRs are in the physical registers.
 
-    // Save all guest GPRs to the save area.
-    // We need the save area pointer, which is on the stack at [rsp+48].
-    // Use RSP-relative addressing to avoid clobbering any register.
-    // But we can't use rdi as the base without losing guest rdi.
-    //
-    // Standard approach: save everything using rsp-relative addressing.
-    // This is verbose but correct.
-
     // Save guest rax first (we need a register to hold the save area ptr)
-    "    mov [rsp + 32], rax",    // Overwrite launch flag slot with guest rax
-                                   // (launch flag is no longer needed)
+    "    mov [rsp + 32], rax",
 
     // Now rax is free. Load save area ptr into rax.
     "    mov rax, [rsp + 48]",    // rax = GuestGprSaveArea ptr
@@ -243,7 +238,6 @@ global_asm!(
     "    mov [rax + 16], rcx",
     "    mov [rax + 24], rdx",
     "    mov [rax + 32], rsi",
-    // Skip rdi for now (we need it)
     "    mov [rax + 48], rbp",
     "    mov [rax + 56], r8",
     "    mov [rax + 64], r9",
@@ -273,7 +267,7 @@ global_asm!(
     "    vmread rax, rsi",
     "    mov [rdi + 4], eax",     // Store exit_intr_info
 
-    "    mov rsi, 0x6400",        // EXIT_QUALIFICATION (actually at encoding 0x6400 for natural width)
+    "    mov rsi, 0x6400",        // EXIT_QUALIFICATION
     "    vmread rax, rsi",
     "    mov [rdi + 8], rax",     // Store exit_qualification
 
@@ -285,7 +279,7 @@ global_asm!(
     "    xor eax, eax",
 
     // Clean up stack
-    "    add rsp, 3*8",           // remove ptrs + launch flag
+    "    add rsp, 3*8",
     "    pop r15",
     "    pop r14",
     "    pop r13",

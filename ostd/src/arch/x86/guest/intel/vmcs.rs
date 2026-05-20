@@ -7,11 +7,11 @@
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
+use super::vmx::{
+    VmxResult, vmwrite, vmptrld, vmclear,
+    vmx_capabilities, adjust_vmx_control, vmcs_field,
+};
 use crate::{
-    arch::guest::vmx::{
-        VmxResult, vmwrite, vmptrld, vmclear,
-        vmx_capabilities, adjust_vmx_control, vmcs_field,
-    },
     cpu::CpuId,
     mm::{FrameAllocOptions, UFrame, paddr_to_vaddr},
     prelude::*,
@@ -215,7 +215,7 @@ impl Vmcs {
     /// # Safety
     ///
     /// VMCS must be loaded on current CPU.
-    unsafe fn init_controls(&self, caps: &crate::arch::guest::vmx::VmxCapabilities) -> Result<()> {
+    unsafe fn init_controls(&self, caps: &super::vmx::VmxCapabilities) -> Result<()> {
         // Pin-based VM-execution controls
         let pin_ctrls = adjust_vmx_control(
             (1 << 0) // External interrupt exiting

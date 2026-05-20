@@ -1,29 +1,25 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! Extended Page Table (EPT) implementation.
+//! Extended Page Table (EPT) implementation for Intel VT-x.
 //!
 //! EPT provides a second level of address translation that maps guest
-//! physical addresses (GPAs) to host physical addresses (HPAs). This
-//! is the foundation of memory isolation for virtual machines.
+//! physical addresses (GPAs) to host physical addresses (HPAs).
 
 use core::marker::PhantomData;
 use core::ops::Range;
 
 use bitflags::bitflags;
 
-use crate::prelude::Result;
 use crate::mm::{
     HasPaddr, Paddr, PagingConstsTrait, PagingLevel, PodOnce, Vaddr,
     page_prop::{CachePolicy, PageFlags, PageProperty, PageTableFlags, PrivilegedPageFlags as PrivFlags},
     page_table::{PageTable, PageTableConfig, PteScalar, PteTrait, CursorMut},
     vm_space::VmQueriedItem,
 };
+use crate::prelude::Result;
 use crate::task::atomic_mode::AsAtomicModeGuard;
 
 /// EPT paging constants.
-///
-/// EPT uses 4 levels of page tables (PML4 -> PDPT -> PD -> PT),
-/// mapping a 48-bit guest physical address space.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct EptPagingConsts {}
 
@@ -31,45 +27,24 @@ impl PagingConstsTrait for EptPagingConsts {
     const BASE_PAGE_SIZE: usize = 4096;
     const NR_LEVELS: PagingLevel = 4;
     const ADDRESS_WIDTH: usize = 48;
-    /// EPT addresses are not sign-extended (unlike regular x86-64 virtual addresses).
     const VA_SIGN_EXT: bool = false;
-    /// Support 2MB huge pages at level 2.
     const HIGHEST_TRANSLATION_LEVEL: PagingLevel = 2;
     const PTE_SIZE: usize = size_of::<EptPageTableEntry>();
 }
 
 bitflags! {
     /// EPT PTE flags.
-    ///
-    /// The EPT PTE format differs from regular page table entries:
-    /// - bits[0:2] = R/W/X permissions (at least one must be set for a valid entry)
-    /// - bits[5:3] = Memory type (0=UC, 1=WC, 4=WT, 5=WP, 6=WB)
-    /// - bits[6] = Ignore PAT
-    /// - bits[7] = Page size (huge page)
-    /// - bits[8] = Accessed
-    /// - bits[9] = Dirty
-    /// - bits[10] = Execute-only (if supported)
-    /// - bits[12:N] = Physical address
     #[repr(C)]
     #[derive(Pod)]
     pub(crate) struct EptPteFlags: u64 {
-        /// Read permission.
         const READ       = 1 << 0;
-        /// Write permission.
         const WRITE      = 1 << 1;
-        /// Execute permission.
         const EXECUTE    = 1 << 2;
-        /// Accessed flag.
         const ACCESSED   = 1 << 8;
-        /// Dirty flag.
         const DIRTY      = 1 << 9;
-        /// Execute-only (if VMX supports it).
         const EXEC_ONLY  = 1 << 10;
-        /// Page size (huge page at level 2 or 3).
         const HUGE       = 1 << 7;
-        /// Ignored by hardware, free for software use.
         const AVAIL1     = 1 << 52;
-        /// Ignored by hardware.
         const AVAIL2     = 1 << 53;
     }
 }
@@ -80,13 +55,8 @@ bitflags! {
 pub(crate) struct EptPageTableEntry(u64);
 
 impl EptPageTableEntry {
-    /// Physical address mask for EPT entries (bits 12:N).
     const PHYS_ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
-
-    /// Physical address mask for 2MB huge pages (bits 21:N).
     const PHYS_ADDR_MASK_2M: u64 = 0x000F_FFFF_FFC0_0000;
-
-    /// Physical address mask for 1GB huge pages (bits 30:N).
     const PHYS_ADDR_MASK_1G: u64 = 0x000F_FFFF_FC00_0000;
 
     fn pa_mask_at_level(level: PagingLevel) -> u64 {
@@ -99,7 +69,6 @@ impl EptPageTableEntry {
     }
 
     fn is_present(&self) -> bool {
-        // An EPT entry is present if at least one of R/W/X is set
         self.0 & (EptPteFlags::READ | EptPteFlags::WRITE | EptPteFlags::EXECUTE).bits() != 0
     }
 
@@ -108,7 +77,6 @@ impl EptPageTableEntry {
     }
 
     fn is_last(&self, level: PagingLevel) -> bool {
-        // Level 1 is always a leaf. Higher levels are leaf if HUGE is set.
         level == 1 || self.is_huge()
     }
 
@@ -132,7 +100,6 @@ impl EptPageTableEntry {
             priv_val |= PrivFlags::AVAIL1.bits();
         }
 
-        // Memory type from bits[5:3]
         let mem_type = ((self.0 >> 3) & 0x7) as u8;
         let cache = match mem_type {
             0 => CachePolicy::Uncacheable,
@@ -163,9 +130,8 @@ impl EptPageTableEntry {
 
     fn new_page(paddr: Paddr, level: PagingLevel, prop: PageProperty) -> Self {
         let pa_mask = Self::pa_mask_at_level(level);
-        let mut flags = EptPteFlags::empty().bits();
+        let mut flags = 0u64;
 
-        // Permissions
         if prop.flags.contains(PageFlags::R) {
             flags |= EptPteFlags::READ.bits();
         }
@@ -179,7 +145,6 @@ impl EptPageTableEntry {
             flags |= EptPteFlags::AVAIL2.bits();
         }
 
-        // Memory type
         let mem_type = match prop.cache {
             CachePolicy::Uncacheable => 0u64,
             CachePolicy::WriteCombining => 1,
@@ -189,9 +154,6 @@ impl EptPageTableEntry {
         };
         flags |= mem_type << 3;
 
-        // Accessed/Dirty not set initially
-
-        // Available bits
         if prop.priv_flags.contains(PrivFlags::AVAIL1) {
             flags |= EptPteFlags::AVAIL1.bits();
         }
@@ -243,9 +205,6 @@ unsafe impl PteTrait for EptPageTableEntry {
 }
 
 /// EPT page table configuration.
-///
-/// This is the `PageTableConfig` implementation that adapts the generic
-/// `PageTable` infrastructure for EPT use.
 #[derive(Clone, Debug)]
 pub(crate) struct EptConfig {}
 
@@ -253,13 +212,11 @@ pub(crate) struct EptConfig {}
 // implemented. Items are tuples of (Paddr, PagingLevel, PageProperty) that
 // faithfully represent the EPT entry state.
 unsafe impl PageTableConfig for EptConfig {
-    /// Full 48-bit GPA space: top-level index 0..512.
     const TOP_LEVEL_INDEX_RANGE: Range<usize> = 0..512;
 
     type E = EptPageTableEntry;
     type C = EptPagingConsts;
 
-    /// EPT uses untracked items (like IommuPtConfig).
     type Item = (Paddr, PagingLevel, PageProperty);
     type ItemRef<'a> = PhantomData<&'a ()>;
 
@@ -280,12 +237,11 @@ unsafe impl PageTableConfig for EptConfig {
     }
 }
 
-/// EPT page property (simpler than PageProperty -- no user/kernel distinction).
+/// EPT page property.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(missing_docs)]
 pub struct EptPageProperty {
-    /// Read/Write/Execute permissions.
     pub flags: EptPageFlags,
-    /// Memory type (0=UC, 1=WC, 4=WT, 5=WP, 6=WB).
     pub mem_type: u8,
 }
 
@@ -309,7 +265,7 @@ impl Default for EptPageProperty {
     fn default() -> Self {
         Self {
             flags: EptPageFlags::RWX,
-            mem_type: 6, // WB
+            mem_type: 6,
         }
     }
 }
@@ -340,23 +296,19 @@ impl From<EptPageProperty> for PageProperty {
     }
 }
 
-/// Guest physical address space backed by EPT.
-///
-/// This is the hypervisor analog of `VmSpace`. It wraps an EPT page table
-/// and provides a cursor API for mapping host frames into guest physical memory.
+/// Intel EPT-based guest physical address space.
 pub struct GuestPhysMemSpace {
     ept: PageTable<EptConfig>,
 }
 
 impl GuestPhysMemSpace {
-    /// Creates a new empty guest physical address space.
+    /// Creates a new empty guest physical address space with EPT.
     pub fn new() -> Self {
         Self {
             ept: PageTable::empty(),
         }
     }
 
-    /// Returns a mutable cursor for mapping frames into guest physical memory.
     pub fn cursor_mut<'a, G: AsAtomicModeGuard>(
         &'a self,
         guard: &'a G,
@@ -367,17 +319,8 @@ impl GuestPhysMemSpace {
         Ok(GuestCursorMut { pt_cursor })
     }
 
-    /// Returns the EPTP value for VMCS initialization.
-    ///
-    /// The EPTP format (64 bits):
-    /// - bits[2:0] = 0 (must be 0)
-    /// - bits[5:3] = memory type (6 = WB)
-    /// - bits[7:6] = page walk length minus 1 (3 for 4 levels)
-    /// - bits[8] = 0 (no access/dirty flags unless supported)
-    /// - bits[51:12] = PML4 physical address
     pub fn eptp(&self) -> u64 {
         let pml4_paddr = self.ept.root_paddr();
-        // Memory type WB (6) in bits[5:3], page walk length 4 in bits[7:6]
         (6u64 << 3) | (3u64 << 6) | ((pml4_paddr as u64) & 0x000F_FFFF_FFFF_F000)
     }
 }
@@ -388,90 +331,54 @@ impl Default for GuestPhysMemSpace {
     }
 }
 
-/// Cursor for mapping frames into guest physical address space.
-///
-/// When dropped, issues INVEPT to maintain EPT TLB coherence.
+/// Intel EPT cursor for mapping frames.
 pub struct GuestCursorMut<'a> {
     pt_cursor: CursorMut<'a, EptConfig>,
 }
 
 impl GuestCursorMut<'_> {
-    /// Maps a host physical frame at the current GPA.
-    ///
-    /// Only untyped frames (UFrame) can be mapped into guest EPT.
-    /// This ensures the guest cannot access typed kernel data structures.
-    ///
-    /// # Safety
-    ///
-    /// The caller must ensure that the physical address is valid and
-    /// mapping it into the guest EPT does not violate isolation.
-    pub unsafe fn map(&mut self, paddr: Paddr, level: PagingLevel, prop: EptPageProperty) {
-        let page_prop: PageProperty = prop.into();
+    pub unsafe fn map(&mut self, paddr: Paddr, level: PagingLevel, prop: PageProperty) {
         // SAFETY: The caller guarantees the physical address is valid
         // and the mapping does not violate guest isolation.
-        unsafe { self.pt_cursor.map((paddr, level, page_prop)) };
+        unsafe { self.pt_cursor.map((paddr, level, prop)) };
     }
 
-    /// Maps a typed frame into the guest EPT at the current GPA.
-    ///
-    /// The frame type guarantees a valid physical address, making
-    /// this a safe operation.
     pub fn map_frame(
         &mut self,
         frame: &impl HasPaddr,
         level: PagingLevel,
-        prop: EptPageProperty,
+        prop: PageProperty,
     ) {
         let paddr = frame.paddr();
-        let page_prop: PageProperty = prop.into();
         // SAFETY: The frame type guarantees a valid physical address.
-        // Mapping untyped frames into guest EPT is safe because the guest
-        // is allowed to access these pages.
-        unsafe { self.pt_cursor.map((paddr, level, page_prop)) };
+        unsafe { self.pt_cursor.map((paddr, level, prop)) };
     }
 
-    /// Maps a zero page as a placeholder in the guest EPT at the current GPA.
-    ///
-    /// This is used for unmapped regions in the host VmSpace. The physical
-    /// address 0 is a safe sentinel that can be mapped into EPT.
-    pub fn map_zero(&mut self, level: PagingLevel, prop: EptPageProperty) {
-        let page_prop: PageProperty = prop.into();
-        // SAFETY: Physical address 0 is used as a safe placeholder sentinel.
-        // It is a valid GPA within the EPT address space.
-        unsafe { self.pt_cursor.map((0, level, page_prop)) };
+    pub fn map_zero(&mut self, level: PagingLevel, prop: PageProperty) {
+        // SAFETY: Physical address 0 is a safe placeholder sentinel.
+        unsafe { self.pt_cursor.map((0, level, prop)) };
     }
 
-    /// Maps an item from a VmSpace query result into the guest EPT.
-    ///
-    /// The `VmQueriedItem` is produced by [`crate::mm::vm_space::Cursor::query`],
-    /// which guarantees that any returned physical address is valid.
-    /// This makes the operation safe without requiring the caller to
-    /// verify the address.
     pub fn map_vm_item(
         &mut self,
         item: &VmQueriedItem<'_>,
         level: PagingLevel,
-        prop: EptPageProperty,
+        prop: PageProperty,
     ) {
-        let page_prop: PageProperty = prop.into();
         match item {
             VmQueriedItem::MappedRam { frame, .. } => {
                 let paddr = frame.paddr();
                 // SAFETY: The frame is a valid allocated page from the frame allocator.
-                unsafe { self.pt_cursor.map((paddr, level, page_prop)) };
+                unsafe { self.pt_cursor.map((paddr, level, prop)) };
             }
             VmQueriedItem::MappedIoMem { paddr, .. } => {
                 // SAFETY: The VmSpace guarantees that MappedIoMem addresses
                 // are valid I/O memory regions.
-                unsafe { self.pt_cursor.map((*paddr, level, page_prop)) };
+                unsafe { self.pt_cursor.map((*paddr, level, prop)) };
             }
         }
     }
 
-    /// Moves the cursor forward to the next page-sized GPA.
-    ///
-    /// Returns the GPA of the next mapping position, or `None` if
-    /// the cursor has reached the end of its range.
     pub fn find_next(&mut self, len: usize) -> Option<u64> {
         self.pt_cursor.find_next(len).map(|va| va as u64)
     }
@@ -479,10 +386,9 @@ impl GuestCursorMut<'_> {
 
 impl Drop for GuestCursorMut<'_> {
     fn drop(&mut self) {
-        // Issue INVEPT to flush EPT TLB entries.
         // SAFETY: INVEPT is safe to call when EPT is active.
         unsafe {
-            crate::arch::guest::vmx::invept_all();
+            super::vmx::invept_all();
         }
     }
 }

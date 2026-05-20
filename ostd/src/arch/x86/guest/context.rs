@@ -3,109 +3,73 @@
 //! Guest CPU context (register state).
 //!
 //! `GuestContext` holds the complete guest CPU state: general-purpose registers,
-//! instruction pointer, flags, segment registers, control registers, and
-//! descriptor tables. It is the guest-mode analog of `UserContext`.
-//!
-//! Note: Guest GPRs (RAX-R15) are NOT VMCS fields in Intel VT-x. They must be
-//! saved/restored explicitly by the VM entry/exit assembly trampoline via the
-//! `GuestGprSaveArea` struct. The `load_into_vmcs`/`save_from_vmcs` methods
-//! only handle VMCS-accessible fields (RIP, RSP, RFLAGS, CRs, segments, EFER).
-
-use crate::arch::guest::vmx::{vmread, vmwrite, vmcs_field};
+//! instruction pointer, flags, segment registers, control registers.
+//! It is the guest-mode analog of `UserContext`.
 
 /// Guest general-purpose register save area.
 ///
-/// This struct is used by the assembly VM entry/exit trampoline to
-/// save and restore guest GPRs. The layout must match the assembly code
-/// in `asm.S`.
+/// Used by the assembly VM entry/exit trampoline to save and restore
+/// guest GPRs. The layout must match the assembly code.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[allow(missing_docs)]
 pub struct GuestGprSaveArea {
-    /// RAX
     pub rax: u64,
-    /// RBX
     pub rbx: u64,
-    /// RCX
     pub rcx: u64,
-    /// RDX
     pub rdx: u64,
-    /// RSI
     pub rsi: u64,
-    /// RDI
     pub rdi: u64,
-    /// RBP
     pub rbp: u64,
-    /// R8
     pub r8: u64,
-    /// R9
     pub r9: u64,
-    /// R10
     pub r10: u64,
-    /// R11
     pub r11: u64,
-    /// R12
     pub r12: u64,
-    /// R13
     pub r13: u64,
-    /// R14
     pub r14: u64,
-    /// R15
     pub r15: u64,
 }
 
-/// Guest system registers (segments, CRs, descriptor tables).
+/// Guest system registers.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[allow(missing_docs)]
 pub struct GuestSregs {
-    /// Guest RSP (managed via VMCS GUEST_RSP, not in GPR save area).
     pub rsp: u64,
-    /// Guest CR0.
     pub cr0: u64,
-    /// Guest CR2 (not in VMCS, maintained by software).
     pub cr2: u64,
-    /// Guest CR3.
     pub cr3: u64,
-    /// Guest CR4.
     pub cr4: u64,
-    /// Guest EFER.
     pub efer: u64,
-    /// Guest APIC base.
     pub apic_base: u64,
 }
 
 /// Guest CPU state (GPRs, RIP, RFLAGS, system registers).
-///
-/// This is the guest-mode analog of `UserContext`. GPRs are saved/restored
-/// by the assembly trampoline (not through VMCS), while RIP, RSP, RFLAGS,
-/// and system registers are synchronized with VMCS.
 #[repr(C)]
 #[derive(Clone, Debug, Default)]
+#[allow(missing_docs)]
 pub struct GuestContext {
-    /// General-purpose registers (saved/restored by assembly, not VMCS).
     pub gprs: GuestGprSaveArea,
-    /// Instruction pointer (VMCS field).
     pub rip: u64,
-    /// RFLAGS register (VMCS field).
     pub rflags: u64,
-    /// System registers (VMCS fields).
     pub sregs: GuestSregs,
 }
 
 impl GuestContext {
-    /// Creates a new `GuestContext` with all registers zeroed.
+    #[allow(missing_docs)]
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Loads guest context into VMCS fields before VM entry.
     ///
-    /// Only VMCS-accessible fields are written. GPRs are loaded from the
-    /// `GuestGprSaveArea` by the assembly trampoline.
-    ///
     /// # Safety
     ///
     /// The VMCS must be loaded (VMPTRLD) on the current CPU.
     pub(crate) unsafe fn load_into_vmcs(&self) {
+        use crate::arch::guest::intel::vmx::{vmcs_field, vmwrite};
+
         // SAFETY: VMCS is loaded on the current CPU.
         unsafe {
             vmwrite(vmcs_field::GUEST_RIP, self.rip);
@@ -120,13 +84,12 @@ impl GuestContext {
 
     /// Saves guest context from VMCS fields after VM exit.
     ///
-    /// Only VMCS-accessible fields are read. GPRs are saved to the
-    /// `GuestGprSaveArea` by the assembly trampoline.
-    ///
     /// # Safety
     ///
     /// The VMCS must be loaded (VMPTRLD) on the current CPU.
     pub(crate) unsafe fn save_from_vmcs(&mut self) {
+        use crate::arch::guest::intel::vmx::{vmcs_field, vmread};
+
         // SAFETY: VMCS is loaded on the current CPU.
         unsafe {
             self.rip = vmread(vmcs_field::GUEST_RIP);

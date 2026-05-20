@@ -5,7 +5,9 @@
 //! A `KvmVcpu` represents a virtual CPU within a VM. It holds the guest
 //! register state, VMCS, and the `kvm_run` shared memory page.
 
-use ostd::guest::{CpuidAccess, GuestContext, GuestExitReason, GuestMode, MsrAccess};
+use ostd::guest::{
+    CpuidAccess, GuestContext, GuestControlBlock, GuestExitReason, GuestMode, MsrAccess,
+};
 
 use crate::{
     device::kvm::vm::KvmVm,
@@ -24,8 +26,8 @@ pub struct KvmVcpu {
     vcpu_id: u32,
     /// Guest register state.
     guest_context: Mutex<GuestContext>,
-    /// VMCS for this vCPU (lazily initialized on first KVM_RUN).
-    vmcs: Mutex<Option<Arc<ostd::arch::guest::vmcs::Vmcs>>>,
+    /// Guest control block (VMCS for Intel, VMCB for AMD), lazily initialized.
+    control_block: Mutex<Option<GuestControlBlock>>,
 }
 
 impl KvmVcpu {
@@ -37,7 +39,7 @@ impl KvmVcpu {
             vm,
             vcpu_id,
             guest_context: Mutex::new(guest_context),
-            vmcs: Mutex::new(None),
+            control_block: Mutex::new(None),
         })
     }
 
@@ -52,16 +54,22 @@ impl KvmVcpu {
         self.vcpu_id
     }
 
-    /// Gets or creates the VMCS for this vCPU.
-    fn ensure_vmcs(&self) -> Result<Arc<ostd::arch::guest::vmcs::Vmcs>> {
-        let mut vmcs_guard = self.vmcs.lock();
-        if let Some(vmcs) = vmcs_guard.as_ref() {
-            return Ok(vmcs.clone());
+    /// Gets or creates the guest control block (VMCS or VMCB) for this vCPU.
+    fn ensure_control_block(&self) -> Result<GuestControlBlock> {
+        let mut cb_guard = self.control_block.lock();
+        if let Some(cb) = cb_guard.as_ref() {
+            return Ok(cb.clone());
         }
 
-        let vmcs = Arc::new(ostd::arch::guest::vmcs::Vmcs::new()?);
-        *vmcs_guard = Some(vmcs.clone());
-        Ok(vmcs)
+        let cb = if ostd::arch::guest::is_amd_cpu() {
+            let vmcb = Arc::new(ostd::arch::guest::amd::vmcb::Vmcb::new()?);
+            GuestControlBlock::Amd(vmcb)
+        } else {
+            let vmcs = Arc::new(ostd::arch::guest::intel::vmcs::Vmcs::new()?);
+            GuestControlBlock::Intel(vmcs)
+        };
+        *cb_guard = Some(cb.clone());
+        Ok(cb)
     }
 
     /// Executes the guest until an exit occurs (KVM_RUN).
@@ -69,23 +77,17 @@ impl KvmVcpu {
     /// Handles CPUID and MSR exits internally by emulating the instructions.
     /// I/O port and MMIO exits are left for userspace to handle.
     pub fn run(&self) -> Result<()> {
-        let vmcs = self.ensure_vmcs()?;
+        let cb = self.ensure_control_block()?;
 
         let eptp = self.vm.phys_mem().eptp();
 
         loop {
-            // Get the guest context
             let context = self.guest_context().lock().clone();
 
-            // Create an ephemeral GuestMode and execute.
-            // On first run, new_initialized handles VMXON + VMPTRLD + VMCS init.
-            // On subsequent runs, new() uses VMRESUME via the already-initialized VMCS.
-            // GuestMode::new() / new_initialized() handles VMXON/VMPTRLD,
-            // and Drop handles VMCLEAR/VMXOFF.
-            let mut guest_mode = if !vmcs.is_launched() {
-                GuestMode::new_initialized(vmcs.clone(), context, eptp)?
+            let mut guest_mode = if !cb.is_launched() {
+                GuestMode::new_initialized(cb.clone(), context, eptp)?
             } else {
-                GuestMode::new(vmcs.clone(), context)?
+                GuestMode::new(cb.clone(), context)?
             };
             let exit_reason = guest_mode.execute(|| false);
 
