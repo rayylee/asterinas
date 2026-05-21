@@ -125,8 +125,14 @@ impl FileIo for KvmFile {
 
 /// Checks a KVM capability.
 fn check_extension(capability: i32) -> i32 {
+    use ioctl::*;
     match capability {
-        0 => 0, // KVM_CAP_IRQCHIP - not supported
+        KVM_CAP_HLT => 1,
+        KVM_CAP_USER_MEMORY => 1,
+        KVM_CAP_SET_TSS_ADDR => 1,
+        KVM_CAP_EXT_CPUID => 1,
+        KVM_CAP_NR_VCPUS => 1,
+        KVM_CAP_NR_MEMSLOTS => 8,
         _ => 0,
     }
 }

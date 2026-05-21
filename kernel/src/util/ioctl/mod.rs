@@ -310,7 +310,7 @@ macro_rules! impl_get_by_val_for {
 }
 
 // We can add more types as needed, e.g., `u32`, `i8`.
-impl_get_by_val_for! { i32 }
+impl_get_by_val_for! { i32 u64 }
 
 impl DataSpec for InData<[u8]> {
     const SIZE: Option<u16> = None;

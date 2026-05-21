@@ -7,14 +7,14 @@
 
 use core::fmt::Display;
 
-use ostd::guest::{GuestPageFlags, GuestPageProperty, GuestPhysMemSpace};
+use ostd::guest::{GuestDtable, GuestPageFlags, GuestPageProperty, GuestPhysMemSpace, GuestSegment};
 use ostd::task::{disable_preempt, Task};
 
 use crate::{
     device::kvm::vcpu::KvmVcpu,
     events::IoEvents,
     fs::{
-        file::{AccessMode, FileLike, file_table::FdFlags},
+        file::{AccessMode, FileLike, Mappable, file_table::FdFlags},
         pseudofs::AnonInodeFs,
         vfs::path::Path,
     },
@@ -33,6 +33,8 @@ pub struct KvmVm {
     vcpus: Mutex<Vec<Arc<KvmVcpu>>>,
     /// Memory region slots.
     mem_regions: Mutex<Vec<super::ioctl::KvmUserspaceMemoryRegion>>,
+    /// TSS address set by KVM_SET_TSS_ADDR.
+    tss_addr: Mutex<Option<u64>>,
 }
 
 impl KvmVm {
@@ -43,6 +45,7 @@ impl KvmVm {
             phys_mem,
             vcpus: Mutex::new(Vec::new()),
             mem_regions: Mutex::new(Vec::new()),
+            tss_addr: Mutex::new(None),
         }))
     }
 
@@ -166,6 +169,15 @@ impl FileLike for KvmVmFile {
                 self.vm.set_user_memory_region(&region)?;
                 Ok(0)
             }
+            cmd @ SetTssAddr => {
+                let addr = cmd.get();
+                *self.vm.tss_addr.lock() = Some(addr);
+                Ok(0)
+            }
+            _cmd @ SetIdentityMapAddr => {
+                // No-op: just acknowledge the ioctl.
+                Ok(0)
+            }
             _ => return_errno_with_message!(Errno::ENOTTY, "unknown KVM VM ioctl"),
         })
     }
@@ -204,7 +216,63 @@ impl FileLike for KvmVmFile {
     }
 }
 
-/// File handle for a KVM vCPU.
+// ---- Segment register conversion functions ----
+
+/// Converts a `GuestSegment` (VMCS ar_bytes format) to a `KvmSegment` (Linux ABI).
+fn guest_seg_to_kvm(seg: &GuestSegment) -> super::ioctl::KvmSegment {
+    let ar = seg.ar_bytes;
+    super::ioctl::KvmSegment {
+        base: seg.base,
+        limit: seg.limit,
+        selector: seg.selector,
+        type_: (ar & 0xF) as u8,
+        present: ((ar >> 7) & 1) as u8,
+        dpl: ((ar >> 5) & 3) as u8,
+        db: ((ar >> 14) & 1) as u8,
+        s: ((ar >> 4) & 1) as u8,
+        l: ((ar >> 13) & 1) as u8,
+        g: ((ar >> 15) & 1) as u8,
+        avl: ((ar >> 12) & 1) as u8,
+        unusable: ((ar >> 16) & 1) as u8,
+        padding: 0,
+    }
+}
+
+/// Converts a `KvmSegment` (Linux ABI) to a `GuestSegment` (VMCS ar_bytes format).
+fn kvm_seg_to_guest(kvm: &super::ioctl::KvmSegment) -> GuestSegment {
+    let ar_bytes = (kvm.type_ as u32 & 0xF)
+        | ((kvm.s as u32 & 1) << 4)
+        | ((kvm.dpl as u32 & 3) << 5)
+        | ((kvm.present as u32 & 1) << 7)
+        | ((kvm.avl as u32 & 1) << 12)
+        | ((kvm.l as u32 & 1) << 13)
+        | ((kvm.db as u32 & 1) << 14)
+        | ((kvm.g as u32 & 1) << 15)
+        | ((kvm.unusable as u32 & 1) << 16);
+    GuestSegment {
+        base: kvm.base,
+        limit: kvm.limit,
+        selector: kvm.selector,
+        ar_bytes,
+    }
+}
+
+/// Converts a `GuestDtable` to a `KvmDtable`.
+fn guest_dtable_to_kvm(dt: &GuestDtable) -> super::ioctl::KvmDtable {
+    super::ioctl::KvmDtable {
+        base: dt.base,
+        limit: dt.limit,
+        padding: [0; 3],
+    }
+}
+
+/// Converts a `KvmDtable` to a `GuestDtable`.
+fn kvm_dtable_to_guest(kvm: &super::ioctl::KvmDtable) -> GuestDtable {
+    GuestDtable {
+        base: kvm.base,
+        limit: kvm.limit,
+    }
+}
 struct KvmVcpuFile {
     vcpu: Arc<KvmVcpu>,
     /// The pseudo path associated with this file.
@@ -284,13 +352,24 @@ impl FileLike for KvmVcpuFile {
             cmd @ GetSregs => {
                 let ctx = self.vcpu.guest_context().lock();
                 let sregs = KvmSregs {
+                    cs: guest_seg_to_kvm(&ctx.sregs.cs),
+                    ds: guest_seg_to_kvm(&ctx.sregs.ds),
+                    es: guest_seg_to_kvm(&ctx.sregs.es),
+                    fs: guest_seg_to_kvm(&ctx.sregs.fs),
+                    gs: guest_seg_to_kvm(&ctx.sregs.gs),
+                    ss: guest_seg_to_kvm(&ctx.sregs.ss),
+                    tr: guest_seg_to_kvm(&ctx.sregs.tr),
+                    ldt: guest_seg_to_kvm(&ctx.sregs.ldt),
+                    gdt: guest_dtable_to_kvm(&ctx.sregs.gdt),
+                    idt: guest_dtable_to_kvm(&ctx.sregs.idt),
                     cr0: ctx.sregs.cr0,
                     cr2: ctx.sregs.cr2,
                     cr3: ctx.sregs.cr3,
                     cr4: ctx.sregs.cr4,
+                    cr8: 0,
                     efer: ctx.sregs.efer,
                     apic_base: ctx.sregs.apic_base,
-                    ..Default::default()
+                    interrupt_bitmap: [0; 4],
                 };
                 cmd.write(&sregs)?;
                 Ok(0)
@@ -298,6 +377,16 @@ impl FileLike for KvmVcpuFile {
             cmd @ SetSregs => {
                 let sregs: KvmSregs = cmd.read()?;
                 let mut ctx = self.vcpu.guest_context().lock();
+                ctx.sregs.cs = kvm_seg_to_guest(&sregs.cs);
+                ctx.sregs.ds = kvm_seg_to_guest(&sregs.ds);
+                ctx.sregs.es = kvm_seg_to_guest(&sregs.es);
+                ctx.sregs.fs = kvm_seg_to_guest(&sregs.fs);
+                ctx.sregs.gs = kvm_seg_to_guest(&sregs.gs);
+                ctx.sregs.ss = kvm_seg_to_guest(&sregs.ss);
+                ctx.sregs.tr = kvm_seg_to_guest(&sregs.tr);
+                ctx.sregs.ldt = kvm_seg_to_guest(&sregs.ldt);
+                ctx.sregs.gdt = kvm_dtable_to_guest(&sregs.gdt);
+                ctx.sregs.idt = kvm_dtable_to_guest(&sregs.idt);
                 ctx.sregs.cr0 = sregs.cr0;
                 ctx.sregs.cr2 = sregs.cr2;
                 ctx.sregs.cr3 = sregs.cr3;
@@ -312,6 +401,10 @@ impl FileLike for KvmVcpuFile {
 
     fn access_mode(&self) -> AccessMode {
         AccessMode::O_RDWR
+    }
+
+    fn mappable(&self) -> Result<Mappable> {
+        Ok(Mappable::Vmo(self.vcpu.kvm_run_vmo().clone()))
     }
 
     fn path(&self) -> &Path {

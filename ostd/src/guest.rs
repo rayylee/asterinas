@@ -17,9 +17,9 @@
 
 #[cfg(target_arch = "x86_64")]
 pub use crate::arch::guest::{
-    CpuidAccess, EptPageFlags, EptPageProperty, GuestContext, GuestControlBlock, GuestExitReason,
-    GuestGprSaveArea, GuestPageFlags, GuestPageProperty, GuestPhysMemSpace, GuestSregs, IoPortAccess,
-    MmioAccess, MsrAccess,
+    CpuidAccess, EptPageFlags, EptPageProperty, GuestContext, GuestControlBlock, GuestDtable,
+    GuestExitReason, GuestGprSaveArea, GuestPageFlags, GuestPageProperty, GuestPhysMemSpace,
+    GuestSegment, GuestSregs, IoPortAccess, MmioAccess, MsrAccess,
 };
 
 #[cfg(target_arch = "x86_64")]
@@ -379,6 +379,67 @@ mod x86_impl {
                     .write_u64(vmcb_offset::CR4, self.context.sregs.cr4);
                 self.vmcb
                     .write_u64(vmcb_offset::EFER, self.context.sregs.efer);
+
+                // Segment registers - write to VMCB using correct offsets
+                // matching the AMD64 APM vmcb_seg layout:
+                //   selector(u16) at seg+0, attrib(u16) at seg+2,
+                //   limit(u32) at seg+4, base(u64) at seg+8
+                Self::load_seg_vmcb(&self.vmcb, vmcb_offset::ES_SEL, &self.context.sregs.es);
+                Self::load_seg_vmcb(&self.vmcb, vmcb_offset::CS_SEL, &self.context.sregs.cs);
+                Self::load_seg_vmcb(&self.vmcb, vmcb_offset::DS_SEL, &self.context.sregs.ds);
+                Self::load_seg_vmcb(&self.vmcb, vmcb_offset::SS_SEL, &self.context.sregs.ss);
+                Self::load_seg_vmcb(&self.vmcb, vmcb_offset::FS_SEL, &self.context.sregs.fs);
+                Self::load_seg_vmcb(&self.vmcb, vmcb_offset::GS_SEL, &self.context.sregs.gs);
+                Self::load_seg_vmcb(&self.vmcb, vmcb_offset::TR_SEL, &self.context.sregs.tr);
+                Self::load_seg_vmcb(&self.vmcb, vmcb_offset::LDTR_SEL, &self.context.sregs.ldt);
+
+                // GDTR/IDTR
+                self.vmcb.write_u64(vmcb_offset::GDTR_BASE, self.context.sregs.gdt.base);
+                self.vmcb
+                    .write_u32(vmcb_offset::GDTR_LIMIT, self.context.sregs.gdt.limit as u32);
+                self.vmcb.write_u64(vmcb_offset::IDTR_BASE, self.context.sregs.idt.base);
+                self.vmcb
+                    .write_u32(vmcb_offset::IDTR_LIMIT, self.context.sregs.idt.limit as u32);
+            }
+        }
+
+        /// Loads a segment register into the VMCB.
+        ///
+        /// The VMCB segment layout (from AMD64 APM):
+        /// - `sel_offset + 0`: selector (u16)
+        /// - `sel_offset + 2`: attrib (u16)
+        /// - `sel_offset + 4`: limit (u32)
+        /// - `sel_offset + 8`: base (u64)
+        ///
+        /// SVM attribute bits differ from VMCS ar_bytes:
+        ///   VMCS: type(4)|s(1)|dpl(2)|p(1)|avl(1)|l(1)|db(1)|g(1)|unusable(1)...
+        ///   SVM:  type(4)|s(1)|dpl(2)|p(1)|rsvd(3)|avl(1)|l(1)|db(1)|g(1)|rsvd(1)
+        unsafe fn load_seg_vmcb(
+            vmcb: &crate::arch::guest::amd::vmcb::Vmcb,
+            sel_offset: u16,
+            seg: &crate::arch::guest::GuestSegment,
+        ) {
+            let ar = seg.ar_bytes;
+            // Convert VMCS ar_bytes to SVM attribute format.
+            // Low 8 bits (type, s, dpl, p) are the same.
+            // VMCS bits 12-15 (avl, l, db, g) map to SVM bits 11-14.
+            let svm_attr = {
+                let low8 = (ar & 0xFF) as u16;
+                let high = ((ar >> 12) & 0xF) as u16; // VMCS bits 12-15 -> SVM bits 11-14
+                let attr = low8 | (high << 11);
+                // Handle unusable: clear present bit in SVM format
+                if (ar >> 16) & 1 != 0 {
+                    attr & !(1 << 7)
+                } else {
+                    attr
+                }
+            };
+
+            unsafe {
+                vmcb.write_u16(sel_offset, seg.selector);
+                vmcb.write_u16(sel_offset + 2, svm_attr);
+                vmcb.write_u32(sel_offset + 4, seg.limit);
+                vmcb.write_u64(sel_offset + 8, seg.base);
             }
         }
 
@@ -394,6 +455,47 @@ mod x86_impl {
                 self.context.sregs.cr3 = self.vmcb.read_u64(vmcb_offset::CR3);
                 self.context.sregs.cr4 = self.vmcb.read_u64(vmcb_offset::CR4);
                 self.context.sregs.efer = self.vmcb.read_u64(vmcb_offset::EFER);
+
+                // Segment registers
+                Self::save_seg_vmcb(&self.vmcb, vmcb_offset::ES_SEL, &mut self.context.sregs.es);
+                Self::save_seg_vmcb(&self.vmcb, vmcb_offset::CS_SEL, &mut self.context.sregs.cs);
+                Self::save_seg_vmcb(&self.vmcb, vmcb_offset::DS_SEL, &mut self.context.sregs.ds);
+                Self::save_seg_vmcb(&self.vmcb, vmcb_offset::SS_SEL, &mut self.context.sregs.ss);
+                Self::save_seg_vmcb(&self.vmcb, vmcb_offset::FS_SEL, &mut self.context.sregs.fs);
+                Self::save_seg_vmcb(&self.vmcb, vmcb_offset::GS_SEL, &mut self.context.sregs.gs);
+                Self::save_seg_vmcb(&self.vmcb, vmcb_offset::TR_SEL, &mut self.context.sregs.tr);
+                Self::save_seg_vmcb(&self.vmcb, vmcb_offset::LDTR_SEL, &mut self.context.sregs.ldt);
+
+                // GDTR/IDTR
+                self.context.sregs.gdt.base = self.vmcb.read_u64(vmcb_offset::GDTR_BASE);
+                self.context.sregs.gdt.limit = self.vmcb.read_u32(vmcb_offset::GDTR_LIMIT) as u16;
+                self.context.sregs.idt.base = self.vmcb.read_u64(vmcb_offset::IDTR_BASE);
+                self.context.sregs.idt.limit = self.vmcb.read_u32(vmcb_offset::IDTR_LIMIT) as u16;
+            }
+        }
+
+        /// Saves a segment register from the VMCB.
+        unsafe fn save_seg_vmcb(
+            vmcb: &crate::arch::guest::amd::vmcb::Vmcb,
+            sel_offset: u16,
+            seg: &mut crate::arch::guest::GuestSegment,
+        ) {
+            unsafe {
+                seg.selector = vmcb.read_u16(sel_offset);
+                let svm_attr = vmcb.read_u16(sel_offset + 2);
+                seg.limit = vmcb.read_u32(sel_offset + 4);
+                seg.base = vmcb.read_u64(sel_offset + 8);
+                // Convert SVM attribute to VMCS ar_bytes format.
+                // Low 8 bits (type, s, dpl, p) are the same.
+                // SVM bits 11-14 (avl, l, db, g) map to VMCS bits 12-15.
+                let low8 = (svm_attr as u32) & 0xFF;
+                let high = ((svm_attr as u32 >> 11) & 0xF) << 12;
+                let unusable = if (svm_attr & (1 << 7)) == 0 {
+                    1u32 << 16
+                } else {
+                    0
+                };
+                seg.ar_bytes = low8 | high | unusable;
             }
         }
 

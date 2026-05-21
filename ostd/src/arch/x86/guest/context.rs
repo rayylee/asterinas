@@ -31,11 +31,49 @@ pub struct GuestGprSaveArea {
     pub r15: u64,
 }
 
-/// Guest system registers.
+/// Guest segment register descriptor.
+///
+/// Stores the full state of a single x86 segment register in a format
+/// convenient for converting to/from the KVM `kvm_segment` ABI and
+/// VMCS/VMCB hardware formats.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[allow(missing_docs)]
+pub struct GuestSegment {
+    pub base: u64,
+    pub limit: u32,
+    pub selector: u16,
+    /// VMCS access-rights format (ar_bytes): type(4) | s(1) | dpl(2) | present(1) |
+    /// avl(1) | l(1) | db(1) | g(1) | unusable(1) | padding(5).
+    /// This is the raw VMCS format; conversion to/from `kvm_segment` is done
+    /// in the kernel services layer.
+    pub ar_bytes: u32,
+}
+
+/// Guest descriptor table register.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[allow(missing_docs)]
+pub struct GuestDtable {
+    pub base: u64,
+    pub limit: u16,
+}
+
+/// Guest system registers.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(missing_docs)]
 pub struct GuestSregs {
+    pub cs: GuestSegment,
+    pub ds: GuestSegment,
+    pub es: GuestSegment,
+    pub fs: GuestSegment,
+    pub gs: GuestSegment,
+    pub ss: GuestSegment,
+    pub tr: GuestSegment,
+    pub ldt: GuestSegment,
+    pub gdt: GuestDtable,
+    pub idt: GuestDtable,
     pub rsp: u64,
     pub cr0: u64,
     pub cr2: u64,
@@ -43,6 +81,55 @@ pub struct GuestSregs {
     pub cr4: u64,
     pub efer: u64,
     pub apic_base: u64,
+}
+
+impl Default for GuestSregs {
+    fn default() -> Self {
+        // Default 64-bit guest state matching typical Linux KVM initial state.
+        let cs = GuestSegment {
+            base: 0,
+            limit: 0xFFFFFFFF,
+            selector: 0x08,
+            ar_bytes: 0xA09B, // Code: execute/read, accessed, present, L=1, G=1
+        };
+        let data_seg = GuestSegment {
+            base: 0,
+            limit: 0xFFFFFFFF,
+            selector: 0x10,
+            ar_bytes: 0xA093, // Data: read/write, accessed, present, DB=1, G=1
+        };
+        let tr = GuestSegment {
+            base: 0,
+            limit: 0x67,
+            selector: 0x28,
+            ar_bytes: 0x008B, // 64-bit TSS, busy, present
+        };
+        let ldt = GuestSegment {
+            base: 0,
+            limit: 0xFFFF,
+            selector: 0,
+            ar_bytes: 0x10000, // Unusable
+        };
+        Self {
+            cs,
+            ds: data_seg,
+            es: data_seg,
+            fs: data_seg,
+            gs: data_seg,
+            ss: data_seg,
+            tr,
+            ldt,
+            gdt: GuestDtable { base: 0, limit: 0 },
+            idt: GuestDtable { base: 0, limit: 0 },
+            rsp: 0,
+            cr0: (1 << 0) | (1 << 2) | (1 << 5) | (1 << 16) | (1 << 18) | (1 << 29) | (1 << 30),
+            cr2: 0,
+            cr3: 0,
+            cr4: (1 << 0) | (1 << 4) | (1 << 7) | (1 << 9) | (1 << 10),
+            efer: (1 << 0) | (1 << 8) | (1 << 10),
+            apic_base: 0,
+        }
+    }
 }
 
 /// Guest CPU state (GPRs, RIP, RFLAGS, system registers).
@@ -79,6 +166,70 @@ impl GuestContext {
             vmwrite(vmcs_field::GUEST_CR3, self.sregs.cr3);
             vmwrite(vmcs_field::GUEST_CR4, self.sregs.cr4);
             vmwrite(vmcs_field::GUEST_IA32_EFER, self.sregs.efer);
+
+            // Segment registers
+            load_segment_vmcs(
+                vmcs_field::GUEST_ES_SELECTOR,
+                vmcs_field::GUEST_ES_LIMIT,
+                vmcs_field::GUEST_ES_AR_BYTES,
+                vmcs_field::GUEST_ES_BASE,
+                &self.sregs.es,
+            );
+            load_segment_vmcs(
+                vmcs_field::GUEST_CS_SELECTOR,
+                vmcs_field::GUEST_CS_LIMIT,
+                vmcs_field::GUEST_CS_AR_BYTES,
+                vmcs_field::GUEST_CS_BASE,
+                &self.sregs.cs,
+            );
+            load_segment_vmcs(
+                vmcs_field::GUEST_SS_SELECTOR,
+                vmcs_field::GUEST_SS_LIMIT,
+                vmcs_field::GUEST_SS_AR_BYTES,
+                vmcs_field::GUEST_SS_BASE,
+                &self.sregs.ss,
+            );
+            load_segment_vmcs(
+                vmcs_field::GUEST_DS_SELECTOR,
+                vmcs_field::GUEST_DS_LIMIT,
+                vmcs_field::GUEST_DS_AR_BYTES,
+                vmcs_field::GUEST_DS_BASE,
+                &self.sregs.ds,
+            );
+            load_segment_vmcs(
+                vmcs_field::GUEST_FS_SELECTOR,
+                vmcs_field::GUEST_FS_LIMIT,
+                vmcs_field::GUEST_FS_AR_BYTES,
+                vmcs_field::GUEST_FS_BASE,
+                &self.sregs.fs,
+            );
+            load_segment_vmcs(
+                vmcs_field::GUEST_GS_SELECTOR,
+                vmcs_field::GUEST_GS_LIMIT,
+                vmcs_field::GUEST_GS_AR_BYTES,
+                vmcs_field::GUEST_GS_BASE,
+                &self.sregs.gs,
+            );
+            load_segment_vmcs(
+                vmcs_field::GUEST_LDTR_SELECTOR,
+                vmcs_field::GUEST_LDTR_LIMIT,
+                vmcs_field::GUEST_LDTR_AR_BYTES,
+                vmcs_field::GUEST_LDTR_BASE,
+                &self.sregs.ldt,
+            );
+            load_segment_vmcs(
+                vmcs_field::GUEST_TR_SELECTOR,
+                vmcs_field::GUEST_TR_LIMIT,
+                vmcs_field::GUEST_TR_AR_BYTES,
+                vmcs_field::GUEST_TR_BASE,
+                &self.sregs.tr,
+            );
+
+            // GDTR/IDTR
+            vmwrite(vmcs_field::GUEST_GDTR_LIMIT, self.sregs.gdt.limit as u64);
+            vmwrite(vmcs_field::GUEST_GDTR_BASE, self.sregs.gdt.base);
+            vmwrite(vmcs_field::GUEST_IDTR_LIMIT, self.sregs.idt.limit as u64);
+            vmwrite(vmcs_field::GUEST_IDTR_BASE, self.sregs.idt.base);
         }
     }
 
@@ -99,6 +250,116 @@ impl GuestContext {
             self.sregs.cr3 = vmread(vmcs_field::GUEST_CR3);
             self.sregs.cr4 = vmread(vmcs_field::GUEST_CR4);
             self.sregs.efer = vmread(vmcs_field::GUEST_IA32_EFER);
+
+            // Segment registers
+            save_segment_vmcs(
+                vmcs_field::GUEST_ES_SELECTOR,
+                vmcs_field::GUEST_ES_LIMIT,
+                vmcs_field::GUEST_ES_AR_BYTES,
+                vmcs_field::GUEST_ES_BASE,
+                &mut self.sregs.es,
+            );
+            save_segment_vmcs(
+                vmcs_field::GUEST_CS_SELECTOR,
+                vmcs_field::GUEST_CS_LIMIT,
+                vmcs_field::GUEST_CS_AR_BYTES,
+                vmcs_field::GUEST_CS_BASE,
+                &mut self.sregs.cs,
+            );
+            save_segment_vmcs(
+                vmcs_field::GUEST_SS_SELECTOR,
+                vmcs_field::GUEST_SS_LIMIT,
+                vmcs_field::GUEST_SS_AR_BYTES,
+                vmcs_field::GUEST_SS_BASE,
+                &mut self.sregs.ss,
+            );
+            save_segment_vmcs(
+                vmcs_field::GUEST_DS_SELECTOR,
+                vmcs_field::GUEST_DS_LIMIT,
+                vmcs_field::GUEST_DS_AR_BYTES,
+                vmcs_field::GUEST_DS_BASE,
+                &mut self.sregs.ds,
+            );
+            save_segment_vmcs(
+                vmcs_field::GUEST_FS_SELECTOR,
+                vmcs_field::GUEST_FS_LIMIT,
+                vmcs_field::GUEST_FS_AR_BYTES,
+                vmcs_field::GUEST_FS_BASE,
+                &mut self.sregs.fs,
+            );
+            save_segment_vmcs(
+                vmcs_field::GUEST_GS_SELECTOR,
+                vmcs_field::GUEST_GS_LIMIT,
+                vmcs_field::GUEST_GS_AR_BYTES,
+                vmcs_field::GUEST_GS_BASE,
+                &mut self.sregs.gs,
+            );
+            save_segment_vmcs(
+                vmcs_field::GUEST_LDTR_SELECTOR,
+                vmcs_field::GUEST_LDTR_LIMIT,
+                vmcs_field::GUEST_LDTR_AR_BYTES,
+                vmcs_field::GUEST_LDTR_BASE,
+                &mut self.sregs.ldt,
+            );
+            save_segment_vmcs(
+                vmcs_field::GUEST_TR_SELECTOR,
+                vmcs_field::GUEST_TR_LIMIT,
+                vmcs_field::GUEST_TR_AR_BYTES,
+                vmcs_field::GUEST_TR_BASE,
+                &mut self.sregs.tr,
+            );
+
+            // GDTR/IDTR
+            self.sregs.gdt.limit = vmread(vmcs_field::GUEST_GDTR_LIMIT) as u16;
+            self.sregs.gdt.base = vmread(vmcs_field::GUEST_GDTR_BASE);
+            self.sregs.idt.limit = vmread(vmcs_field::GUEST_IDTR_LIMIT) as u16;
+            self.sregs.idt.base = vmread(vmcs_field::GUEST_IDTR_BASE);
         }
+    }
+}
+
+/// Loads a single segment register into VMCS fields.
+///
+/// # Safety
+///
+/// The VMCS must be loaded (VMPTRLD) on the current CPU.
+#[inline]
+unsafe fn load_segment_vmcs(
+    sel_field: u32,
+    limit_field: u32,
+    ar_field: u32,
+    base_field: u32,
+    seg: &GuestSegment,
+) {
+    use crate::arch::guest::intel::vmx::vmwrite;
+
+    unsafe {
+        vmwrite(sel_field, seg.selector as u64);
+        vmwrite(limit_field, seg.limit as u64);
+        vmwrite(ar_field, seg.ar_bytes as u64);
+        vmwrite(base_field, seg.base);
+    }
+}
+
+/// Saves a single segment register from VMCS fields.
+///
+/// # Safety
+///
+/// The VMCS must be loaded (VMPTRLD) on the current CPU.
+#[inline]
+unsafe fn save_segment_vmcs(
+    sel_field: u32,
+    limit_field: u32,
+    ar_field: u32,
+    base_field: u32,
+    seg: &mut GuestSegment,
+) {
+    use crate::arch::guest::intel::vmx::vmread;
+
+    unsafe {
+        seg.selector = vmread(sel_field) as u16;
+        seg.limit = vmread(limit_field) as u32;
+        seg.ar_bytes = vmread(ar_field) as u32;
+        seg.base = vmread(base_field);
     }
 }

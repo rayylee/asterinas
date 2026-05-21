@@ -235,27 +235,37 @@ impl Vmcb {
     /// VMCB must be valid.
     unsafe fn init_guest_state(&self) -> Result<()> {
         // SAFETY: Writing to valid VMCB state save area offsets.
+        //
+        // SVM segment attribute format (u16):
+        //   type(4)|s(1)|dpl(2)|p(1)|rsvd(3)|avl(1)|l(1)|db(1)|g(1)|rsvd(1)
+        // This differs from VMCS ar_bytes where avl/l/db/g are bits 12-15.
+        // In SVM, avl/l/db/g are bits 11-14.
         unsafe {
-            // CS: Selector=0x08, Limit=0xFFFFFFFF, Attr=0xA09B, Base=0
-            self.write_u16(0x014, 0x08);   // CS selector
-            self.write_u32(0x018, 0xFFFFFFFF); // CS limit
-            self.write_u32(0x01C, 0xA09B);    // CS attributes
-            self.write_u64(0x010, 0);          // CS base
+            // CS: Selector=0x08, Limit=0xFFFFFFFF, Attr=0x509B, Base=0
+            // SVM attr 0x509B = type=B, s=1, p=1, l=1, g=1 (64-bit code segment)
+            self.write_u16(vmcb_offset::CS_SEL, 0x08);
+            self.write_u16(vmcb_offset::CS_ATTR, 0x509B);
+            self.write_u32(vmcb_offset::CS_LIMIT, 0xFFFFFFFF);
+            self.write_u64(vmcb_offset::CS_BASE, 0);
 
-            // DS/ES/SS/FS/GS: data segments
-            // ES at 0x000, DS at 0x070, etc.
-            // For simplicity, set all data segments similarly.
-            self.write_u16(0x004, 0x10);   // ES selector
-            self.write_u32(0x008, 0xFFFFFFFF); // ES limit
-            self.write_u32(0x00C, 0xA093);    // ES attributes
+            // ES: data segment
+            // SVM attr 0x2093 = type=3, s=1, p=1, db=1, g=1 (data segment)
+            self.write_u16(vmcb_offset::ES_SEL, 0x10);
+            self.write_u16(vmcb_offset::ES_ATTR, 0x2093);
+            self.write_u32(vmcb_offset::ES_LIMIT, 0xFFFFFFFF);
+            self.write_u64(vmcb_offset::ES_BASE, 0);
 
-            self.write_u16(0x074, 0x10);   // DS selector
-            self.write_u32(0x078, 0xFFFFFFFF); // DS limit
-            self.write_u32(0x07C, 0xA093);    // DS attributes
+            // DS: data segment
+            self.write_u16(vmcb_offset::DS_SEL, 0x10);
+            self.write_u16(vmcb_offset::DS_ATTR, 0x2093);
+            self.write_u32(vmcb_offset::DS_LIMIT, 0xFFFFFFFF);
+            self.write_u64(vmcb_offset::DS_BASE, 0);
 
-            self.write_u16(0x09C, 0x10);   // SS selector
-            self.write_u32(0x0A0, 0xFFFFFFFF); // SS limit
-            self.write_u32(0x0A4, 0xA093);    // SS attributes
+            // SS: data segment
+            self.write_u16(vmcb_offset::SS_SEL, 0x10);
+            self.write_u16(vmcb_offset::SS_ATTR, 0x2093);
+            self.write_u32(vmcb_offset::SS_LIMIT, 0xFFFFFFFF);
+            self.write_u64(vmcb_offset::SS_BASE, 0);
 
             // RIP (offset 0x268)
             self.write_u64(0x268, 0);
@@ -307,11 +317,24 @@ impl Vmcb {
     /// # Safety
     ///
     /// Offset must be valid.
-    unsafe fn write_u16(&self, offset: u16, value: u16) {
+    pub(crate) unsafe fn write_u16(&self, offset: u16, value: u16) {
         // SAFETY: Caller ensures offset is within VMCB bounds.
         unsafe {
             let ptr = self.vaddr().add(offset as usize) as *mut u16;
             core::ptr::write_volatile(ptr, value)
+        }
+    }
+
+    /// Reads a u16 field from the VMCB at the given byte offset.
+    ///
+    /// # Safety
+    ///
+    /// The offset must be within the VMCB region (0..4096).
+    pub unsafe fn read_u16(&self, offset: u16) -> u16 {
+        // SAFETY: Caller ensures offset is within VMCB bounds.
+        unsafe {
+            let ptr = self.vaddr().add(offset as usize) as *const u16;
+            core::ptr::read_volatile(ptr)
         }
     }
 
@@ -354,17 +377,64 @@ impl Drop for Vmcb {
 }
 
 /// VMCB state save area field offsets (byte offsets from VMCB base).
+///
+/// Each segment register occupies 16 bytes with this layout:
+///   selector(2) at +0, attrib(2) at +2, limit(4) at +4, base(8) at +8
+///
+/// This matches the AMD64 APM Volume 2, Table B-1 and the Linux kernel's
+/// `struct vmcb_seg` layout.
 #[allow(dead_code)]
 pub(crate) mod vmcb_offset {
-    // State save area
-    pub const ES_BASE: u16 = 0x000;
-    pub const CS_BASE: u16 = 0x010;
-    pub const DS_BASE: u16 = 0x070;
-    pub const SS_BASE: u16 = 0x098;
-    pub const GDTR_BASE: u16 = 0x0C0;
-    pub const LDTR_BASE: u16 = 0x0D0;
-    pub const IDTR_BASE: u16 = 0x0E0;
-    pub const TR_BASE: u16 = 0x0F0;
+    // Segment registers (each 16 bytes: selector, attrib, limit, base)
+    pub const ES_SEL: u16 = 0x000;
+    pub const ES_ATTR: u16 = 0x002;
+    pub const ES_LIMIT: u16 = 0x004;
+    pub const ES_BASE: u16 = 0x008;
+
+    pub const CS_SEL: u16 = 0x010;
+    pub const CS_ATTR: u16 = 0x012;
+    pub const CS_LIMIT: u16 = 0x014;
+    pub const CS_BASE: u16 = 0x018;
+
+    pub const SS_SEL: u16 = 0x020;
+    pub const SS_ATTR: u16 = 0x022;
+    pub const SS_LIMIT: u16 = 0x024;
+    pub const SS_BASE: u16 = 0x028;
+
+    pub const DS_SEL: u16 = 0x030;
+    pub const DS_ATTR: u16 = 0x032;
+    pub const DS_LIMIT: u16 = 0x034;
+    pub const DS_BASE: u16 = 0x038;
+
+    pub const FS_SEL: u16 = 0x040;
+    pub const FS_ATTR: u16 = 0x042;
+    pub const FS_LIMIT: u16 = 0x044;
+    pub const FS_BASE: u16 = 0x048;
+
+    pub const GS_SEL: u16 = 0x050;
+    pub const GS_ATTR: u16 = 0x052;
+    pub const GS_LIMIT: u16 = 0x054;
+    pub const GS_BASE: u16 = 0x058;
+
+    pub const GDTR_SEL: u16 = 0x060;
+    pub const GDTR_ATTR: u16 = 0x062;
+    pub const GDTR_LIMIT: u16 = 0x064;
+    pub const GDTR_BASE: u16 = 0x068;
+
+    pub const LDTR_SEL: u16 = 0x070;
+    pub const LDTR_ATTR: u16 = 0x072;
+    pub const LDTR_LIMIT: u16 = 0x074;
+    pub const LDTR_BASE: u16 = 0x078;
+
+    pub const IDTR_SEL: u16 = 0x080;
+    pub const IDTR_ATTR: u16 = 0x082;
+    pub const IDTR_LIMIT: u16 = 0x084;
+    pub const IDTR_BASE: u16 = 0x088;
+
+    pub const TR_SEL: u16 = 0x090;
+    pub const TR_ATTR: u16 = 0x092;
+    pub const TR_LIMIT: u16 = 0x094;
+    pub const TR_BASE: u16 = 0x098;
 
     pub const CR0: u16 = 0x230;
     pub const CR2: u16 = 0x238;

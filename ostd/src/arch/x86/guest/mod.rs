@@ -24,7 +24,7 @@ use crate::prelude::*;
 use crate::task::atomic_mode::AsAtomicModeGuard;
 
 // Re-export shared public types
-pub use context::{GuestContext, GuestGprSaveArea, GuestSregs};
+pub use context::{GuestContext, GuestDtable, GuestGprSaveArea, GuestSegment, GuestSregs};
 pub use vmexit::{
     CpuidAccess, EptViolationInfo, FailEntryInfo, GuestExitReason, IoPortAccess, MmioAccess,
     MsrAccess,
