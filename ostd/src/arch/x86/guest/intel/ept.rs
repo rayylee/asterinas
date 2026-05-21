@@ -5,19 +5,22 @@
 //! EPT provides a second level of address translation that maps guest
 //! physical addresses (GPAs) to host physical addresses (HPAs).
 
-use core::marker::PhantomData;
-use core::ops::Range;
+use core::{marker::PhantomData, ops::Range};
 
 use bitflags::bitflags;
 
-use crate::mm::{
-    HasPaddr, Paddr, PagingConstsTrait, PagingLevel, PodOnce, Vaddr,
-    page_prop::{CachePolicy, PageFlags, PageProperty, PageTableFlags, PrivilegedPageFlags as PrivFlags},
-    page_table::{PageTable, PageTableConfig, PteScalar, PteTrait, CursorMut},
-    vm_space::VmQueriedItem,
+use crate::{
+    mm::{
+        HasPaddr, Paddr, PagingConstsTrait, PagingLevel, PodOnce, Vaddr,
+        page_prop::{
+            CachePolicy, PageFlags, PageProperty, PageTableFlags, PrivilegedPageFlags as PrivFlags,
+        },
+        page_table::{CursorMut, PageTable, PageTableConfig, PteScalar, PteTrait},
+        vm_space::VmQueriedItem,
+    },
+    prelude::Result,
+    task::atomic_mode::AsAtomicModeGuard,
 };
-use crate::prelude::Result;
-use crate::task::atomic_mode::AsAtomicModeGuard;
 
 /// EPT paging constants.
 #[derive(Clone, Debug, Default)]
@@ -343,12 +346,7 @@ impl GuestCursorMut<'_> {
         unsafe { self.pt_cursor.map((paddr, level, prop)) };
     }
 
-    pub fn map_frame(
-        &mut self,
-        frame: &impl HasPaddr,
-        level: PagingLevel,
-        prop: PageProperty,
-    ) {
+    pub fn map_frame(&mut self, frame: &impl HasPaddr, level: PagingLevel, prop: PageProperty) {
         let paddr = frame.paddr();
         // SAFETY: The frame type guarantees a valid physical address.
         unsafe { self.pt_cursor.map((paddr, level, prop)) };
@@ -377,6 +375,11 @@ impl GuestCursorMut<'_> {
                 unsafe { self.pt_cursor.map((*paddr, level, prop)) };
             }
         }
+    }
+
+    pub fn map_paddr(&mut self, paddr: Paddr, level: PagingLevel, prop: PageProperty) {
+        // SAFETY: The caller is responsible for ensuring the physical address is valid.
+        unsafe { self.pt_cursor.map((paddr, level, prop)) };
     }
 
     pub fn find_next(&mut self, len: usize) -> Option<u64> {

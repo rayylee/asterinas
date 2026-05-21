@@ -6,17 +6,21 @@
 //! providing a Linux KVM-compatible user-space API for hardware virtualization.
 
 mod ioctl;
-mod vm;
 mod vcpu;
+mod vm;
 
 use device_id::{DeviceId, MajorId, MinorId};
 use spin::Once;
+
 use crate::{
-    device::{Device, DeviceType, DevtmpfsInodeMeta, registry::char::{self, MajorIdOwner, acquire_major}},
+    device::{
+        Device, DeviceType, DevtmpfsInodeMeta,
+        registry::char::{self, MajorIdOwner, acquire_major},
+    },
     events::IoEvents,
     fs::{
-        file::{FileIo, StatusFlags},
-        vfs::inode::InodeIo,
+        file::{PerOpenFileOps, StatusFlags},
+        vfs::inode::FileOps,
     },
     prelude::*,
     process::signal::{PollHandle, Pollable},
@@ -56,7 +60,7 @@ impl Device for KvmDevice {
         Some(DevtmpfsInodeMeta::new("kvm"))
     }
 
-    fn open(&self) -> Result<Box<dyn FileIo>> {
+    fn open(&self) -> Result<Box<dyn PerOpenFileOps>> {
         Ok(Box::new(KvmFile))
     }
 }
@@ -70,7 +74,7 @@ impl Pollable for KvmFile {
     }
 }
 
-impl InodeIo for KvmFile {
+impl FileOps for KvmFile {
     fn read_at(
         &self,
         _offset: usize,
@@ -90,7 +94,7 @@ impl InodeIo for KvmFile {
     }
 }
 
-impl FileIo for KvmFile {
+impl PerOpenFileOps for KvmFile {
     fn check_seekable(&self) -> Result<()> {
         return_errno_with_message!(Errno::ESPIPE, "KVM device is not seekable")
     }
@@ -107,6 +111,8 @@ impl FileIo for KvmFile {
                 Ok(KVM_API_VERSION)
             }
             _cmd @ CreateVm => {
+                println!("KVM: CREATE_VM");
+                ensure_capabilities_detected()?;
                 let vm = vm::KvmVm::new()?;
                 let fd = vm.register_fd()?;
                 Ok(fd as i32)
@@ -116,6 +122,7 @@ impl FileIo for KvmFile {
                 Ok(check_extension(capability))
             }
             _cmd @ GetVcpuMmapSize => {
+                println!("KVM: GET_VCPU_MMAP_SIZE");
                 Ok(vcpu::KVM_RUN_SIZE as i32)
             }
             _ => return_errno_with_message!(Errno::ENOTTY, "unknown KVM ioctl"),
@@ -140,11 +147,47 @@ fn check_extension(capability: i32) -> i32 {
 /// Initializes the KVM device module.
 ///
 /// Registers `/dev/kvm` as a character device with major number 232.
+/// Hardware virtualization capabilities are detected lazily when
+/// a VM is first created.
 pub fn init() -> Result<()> {
     KVM_MAJOR.call_once(|| acquire_major(MajorId::new(232)).unwrap());
     let major_id = KVM_MAJOR.get().unwrap().get();
     let device = KvmDevice::new(major_id);
     char::register(device)?;
+    Ok(())
+}
+
+/// Ensures hardware virtualization capabilities have been detected.
+///
+/// Called on first KVM_CREATE_VM to detect VMX/SVM capabilities.
+/// Returns an error if hardware virtualization is not available.
+fn ensure_capabilities_detected() -> Result<()> {
+    static DETECTED: spin::Once<()> = spin::Once::new();
+    if DETECTED.is_completed() {
+        return Ok(());
+    }
+
+    // Try to detect capabilities. We must try both paths since
+    // is_amd_cpu() may succeed on AMD even if SVM is locked.
+    let result = if ostd::guest::is_amd_cpu() {
+        println!("KVM: AMD CPU detected, detecting SVM capabilities");
+        ostd::guest::detect_svm_capabilities()
+    } else {
+        println!("KVM: Intel CPU detected, detecting VMX capabilities");
+        ostd::guest::detect_vmx_capabilities()
+    };
+
+    match result {
+        Ok(()) => {
+            println!("KVM: Capabilities detected successfully");
+        }
+        Err(e) => {
+            println!("KVM: Capability detection failed: {:?}", e);
+            return Err(Error::new(Errno::ENODEV));
+        }
+    }
+
+    DETECTED.call_once(|| {});
     Ok(())
 }
 

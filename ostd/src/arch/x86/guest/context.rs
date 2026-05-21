@@ -85,24 +85,26 @@ pub struct GuestSregs {
 
 impl Default for GuestSregs {
     fn default() -> Self {
-        // Default 64-bit guest state matching typical Linux KVM initial state.
+        // Default 32-bit protected-mode guest state, compatible with common
+        // VMM expectations. Long-mode bits (LME/LMA in EFER, L in CS) are NOT
+        // set by default — they must be explicitly configured by the VMM.
         let cs = GuestSegment {
             base: 0,
             limit: 0xFFFFFFFF,
             selector: 0x08,
-            ar_bytes: 0xA09B, // Code: execute/read, accessed, present, L=1, G=1
+            ar_bytes: 0xC09B, // Code: execute/read, accessed, present, DB=1, G=1
         };
         let data_seg = GuestSegment {
             base: 0,
             limit: 0xFFFFFFFF,
             selector: 0x10,
-            ar_bytes: 0xA093, // Data: read/write, accessed, present, DB=1, G=1
+            ar_bytes: 0xC093, // Data: read/write, accessed, present, DB=1, G=1
         };
         let tr = GuestSegment {
             base: 0,
             limit: 0x67,
             selector: 0x28,
-            ar_bytes: 0x008B, // 64-bit TSS, busy, present
+            ar_bytes: 0x008B, // 32-bit TSS, busy, present
         };
         let ldt = GuestSegment {
             base: 0,
@@ -122,11 +124,11 @@ impl Default for GuestSregs {
             gdt: GuestDtable { base: 0, limit: 0 },
             idt: GuestDtable { base: 0, limit: 0 },
             rsp: 0,
-            cr0: (1 << 0) | (1 << 2) | (1 << 5) | (1 << 16) | (1 << 18) | (1 << 29) | (1 << 30),
+            cr0: (1 << 0) | (1 << 1) | (1 << 4) | (1 << 5) | (1 << 16),
             cr2: 0,
             cr3: 0,
-            cr4: (1 << 0) | (1 << 4) | (1 << 7) | (1 << 9) | (1 << 10),
-            efer: (1 << 0) | (1 << 8) | (1 << 10),
+            cr4: 0,
+            efer: 1 << 0, // just SCE
             apic_base: 0,
         }
     }

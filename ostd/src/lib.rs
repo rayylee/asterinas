@@ -37,6 +37,7 @@ pub mod console;
 pub mod cpu;
 mod error;
 mod ex_table;
+pub mod guest;
 pub mod io;
 pub mod irq;
 pub mod log;
@@ -48,7 +49,6 @@ pub mod smp;
 pub mod sync;
 pub mod task;
 pub mod timer;
-pub mod guest;
 pub mod user;
 pub mod util;
 

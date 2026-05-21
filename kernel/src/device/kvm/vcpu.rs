@@ -14,7 +14,8 @@ use crate::{
     device::kvm::{
         ioctl::{
             KVM_EXIT_FAIL_ENTRY, KVM_EXIT_HLT, KVM_EXIT_INTERNAL_ERROR, KVM_EXIT_IO,
-            KVM_EXIT_IO_OUT, KVM_EXIT_SHUTDOWN, KVM_RUN_IO_DATA_OFFSET, KvmRun, KvmRunIo,
+            KVM_EXIT_IO_IN, KVM_EXIT_IO_OUT, KVM_EXIT_SHUTDOWN, KVM_RUN_IO_DATA_OFFSET, KvmRun,
+            KvmRunIo,
         },
         vm::KvmVm,
     },
@@ -43,12 +44,16 @@ pub struct KvmVcpu {
 impl KvmVcpu {
     /// Creates a new vCPU.
     pub fn new(vm: Arc<KvmVm>, vcpu_id: u32) -> Result<Self> {
+        println!("KVM: KvmVcpu::new start");
         let guest_context = GuestContext::new();
 
         // Create the kvm_run shared memory VMO.
+        println!("KVM: KvmVcpu::new creating VMO");
         let kvm_run_vmo = VmoOptions::new(KVM_RUN_SIZE).alloc()?;
         // Pre-commit the page so it is always available without page faults.
+        println!("KVM: KvmVcpu::new committing VMO page");
         kvm_run_vmo.commit_on(0)?;
+        println!("KVM: KvmVcpu::new done");
 
         Ok(Self {
             vm,
@@ -102,16 +107,23 @@ impl KvmVcpu {
         let cb = self.ensure_control_block()?;
 
         let eptp = self.vm.phys_mem().eptp();
+        println!("KVM: run() eptp={:#x}", eptp);
 
         loop {
             let context = self.guest_context().lock().clone();
+            println!(
+                "KVM: run() creating GuestMode, launched={}",
+                cb.is_launched()
+            );
 
             let mut guest_mode = if !cb.is_launched() {
                 GuestMode::new_initialized(cb.clone(), context, eptp)?
             } else {
                 GuestMode::new(cb.clone(), context)?
             };
+            println!("KVM: run() executing guest");
             let exit_reason = guest_mode.execute(|| false);
+            println!("KVM: run() guest exited: {:?}", exit_reason);
 
             // Save the updated guest context
             let updated_context = guest_mode.context().clone();
@@ -176,7 +188,7 @@ impl KvmVcpu {
         let direction: u8 = if io_info.is_write {
             KVM_EXIT_IO_OUT
         } else {
-            0 // KVM_EXIT_IO_IN
+            KVM_EXIT_IO_IN
         };
 
         let io = KvmRunIo {
@@ -242,11 +254,9 @@ impl KvmVcpu {
     fn write_kvm_run(&self, kvm_run: &KvmRun) {
         let bytes = kvm_run.as_bytes();
         let mut reader = VmReader::from(bytes).to_fallible();
-        self.kvm_run_vmo
-            .write(0, &mut reader)
-            .unwrap_or_else(|e| {
-                debug!("KVM: failed to write kvm_run: {:?}", e);
-            });
+        self.kvm_run_vmo.write(0, &mut reader).unwrap_or_else(|e| {
+            debug!("KVM: failed to write kvm_run: {:?}", e);
+        });
     }
 
     // ---- CPUID / MSR emulation ----
@@ -344,13 +354,15 @@ impl KvmVcpu {
                 let mut ctx = self.guest_context().lock();
                 ctx.sregs.apic_base = value;
             }
-            0xC0000081 | 0xC0000082 | 0xC0000083 | 0xC0000084
-            | 0xC0000100 | 0xC0000101 | 0xC0000102 | 0xC0000103
-            | 0x00000174 | 0x00000175 | 0x00000176 => {}
+            0xC0000081 | 0xC0000082 | 0xC0000083 | 0xC0000084 | 0xC0000100 | 0xC0000101
+            | 0xC0000102 | 0xC0000103 | 0x00000174 | 0x00000175 | 0x00000176 => {}
             0x000001A0 | 0x00000079 | 0x0000008B => {}
             0x00000010 => {}
             _ => {
-                debug!("KVM: WRMSR unknown MSR {:#x} = {:#x}, ignoring", msr_index, value);
+                debug!(
+                    "KVM: WRMSR unknown MSR {:#x} = {:#x}, ignoring",
+                    msr_index, value
+                );
             }
         }
 

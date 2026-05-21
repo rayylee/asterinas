@@ -3,12 +3,12 @@
 //! VMX capability detection, VMXON/VMXOFF lifecycle, and per-CPU reference counting.
 
 use crate::{
+    Error,
     cpu::CpuId,
+    cpu_local_cell,
     mm::{FrameAllocOptions, UFrame, paddr_to_vaddr},
     prelude::*,
-    Error,
 };
-use crate::cpu_local_cell;
 
 /// VMX instruction result.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -175,6 +175,7 @@ pub(crate) fn vmx_enter() -> Result<()> {
         return Ok(());
     }
 
+    println!("KVM: vmx_enter - first time on this CPU, setting CR4.VMXE");
     // First GuestMode on this CPU: perform VMXON
     // SAFETY: We verified VMX support. Setting CR4.VMXE is required
     // before VMXON and is safe at CPL 0.
@@ -185,12 +186,18 @@ pub(crate) fn vmx_enter() -> Result<()> {
     }
 
     // Allocate VMXON region (4KB)
+    println!("KVM: vmx_enter - allocating VMXON frame");
     let vmxon_frame = FrameAllocOptions::new()
         .alloc_frame()
         .map_err(|_| Error::NoMemory)?;
 
     // Write VMCS revision ID at byte 0-3 of VMXON region
     let revision_id = vmx_capabilities().vmcs_revision_id;
+    println!(
+        "KVM: vmx_enter - revision_id={:#x}, paddr={:#x}",
+        revision_id,
+        vmxon_frame.paddr()
+    );
     let vaddr = paddr_to_vaddr(vmxon_frame.paddr());
     // SAFETY: We just allocated this frame. Writing the revision ID
     // is required by the VMX specification.
@@ -201,8 +208,13 @@ pub(crate) fn vmx_enter() -> Result<()> {
     let vmxon_paddr = vmxon_frame.paddr();
     // SAFETY: VMXON region is properly initialized, CR4.VMXE is set,
     // and we are at CPL 0.
+    println!(
+        "KVM: vmx_enter - executing VMXON at paddr={:#x}",
+        vmxon_paddr
+    );
     let result = unsafe { asm_vmxon(vmxon_paddr) };
     let result = VmxResult::from_asm_result(result);
+    println!("KVM: vmx_enter - VMXON result={:?}", result);
 
     if result != VmxResult::Ok {
         // SAFETY: Clearing CR4.VMXE after failed VMXON.
@@ -218,8 +230,11 @@ pub(crate) fn vmx_enter() -> Result<()> {
 
     // Store the VMXON frame so it stays alive while VMX root mode is active
     let cpu_id: u32 = CpuId::current_racy().into();
-    vmxon_frames().lock().insert(cpu_id, Arc::new(vmxon_frame.into()));
+    vmxon_frames()
+        .lock()
+        .insert(cpu_id, Arc::new(vmxon_frame.into()));
 
+    println!("KVM: vmx_enter - done, CPU {}", cpu_id);
     Ok(())
 }
 
@@ -300,7 +315,9 @@ pub(crate) unsafe fn vmclear(paddr: Paddr) -> VmxResult {
 pub(crate) unsafe fn invept_all() {
     let desc: [u64; 2] = [0, 0];
     // SAFETY: The caller ensures EPT is configured and VMX root mode is active.
-    unsafe { asm_invept(2, desc.as_ptr()); }
+    unsafe {
+        asm_invept(2, desc.as_ptr());
+    }
 }
 
 /// VMCS field encoding constants.

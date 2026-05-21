@@ -19,18 +19,22 @@
 pub use crate::arch::guest::{
     CpuidAccess, EptPageFlags, EptPageProperty, GuestContext, GuestControlBlock, GuestDtable,
     GuestExitReason, GuestGprSaveArea, GuestPageFlags, GuestPageProperty, GuestPhysMemSpace,
-    GuestSegment, GuestSregs, IoPortAccess, MmioAccess, MsrAccess,
+    GuestSegment, GuestSregs, IoPortAccess, MmioAccess, MsrAccess, detect_svm_capabilities,
+    detect_vmx_capabilities, is_amd_cpu,
 };
 
 #[cfg(target_arch = "x86_64")]
 mod x86_impl {
-    use crate::arch::guest::vmexit::GuestExitReason;
-    use crate::arch::guest::{GuestContext, GuestControlBlock};
-    use crate::arch::guest::intel::vmcs::Vmcs;
-    use crate::arch::guest::amd::vmcb::Vmcb;
-    use crate::prelude::*;
-    use crate::task::disable_preempt;
     use core::sync::atomic::{AtomicBool, Ordering};
+
+    use crate::{
+        arch::guest::{
+            GuestContext, GuestControlBlock, amd::vmcb::Vmcb, intel::vmcs::Vmcs,
+            vmexit::GuestExitReason,
+        },
+        prelude::*,
+        task::disable_preempt,
+    };
 
     /// Safe abstraction for guest-mode execution (analog of `UserMode`).
     ///
@@ -88,8 +92,7 @@ mod x86_impl {
                         .map(IntelGuestMode::into_inner)
                 }
                 GuestControlBlock::Amd(vmcb) => {
-                    AmdGuestMode::new_initialized(vmcb, context, eptp)
-                        .map(AmdGuestMode::into_inner)
+                    AmdGuestMode::new_initialized(vmcb, context, eptp).map(AmdGuestMode::into_inner)
                 }
             }
         }
@@ -141,13 +144,24 @@ mod x86_impl {
         }
 
         fn new_initialized(vmcs: Arc<Vmcs>, context: GuestContext, eptp: u64) -> Result<Self> {
+            println!("KVM: IntelGuestMode::new_initialized - calling vmx_enter");
             let _vmxon_frame = crate::arch::guest::intel::vmx::vmx_enter()?;
+            println!(
+                "KVM: IntelGuestMode::new_initialized - vmx_enter OK, calling load_on_current_cpu"
+            );
 
             // SAFETY: We are in VMX root mode.
             unsafe {
                 vmcs.load_on_current_cpu()?;
+            }
+            println!(
+                "KVM: IntelGuestMode::new_initialized - load_on_current_cpu OK, calling initialize"
+            );
+
+            unsafe {
                 vmcs.initialize(eptp)?;
             }
+            println!("KVM: IntelGuestMode::new_initialized - initialize OK");
 
             Ok(Self { context, vmcs })
         }
@@ -160,8 +174,10 @@ mod x86_impl {
         where
             F: FnMut() -> bool,
         {
-            use crate::arch::guest::intel::vmexit::VmxExitInfo;
-            use crate::arch::guest::intel::vmx::{vmcs_field, vmwrite};
+            use crate::arch::guest::intel::{
+                vmexit::VmxExitInfo,
+                vmx::{vmcs_field, vmwrite},
+            };
 
             let _preempt_guard = disable_preempt();
 
@@ -182,10 +198,7 @@ mod x86_impl {
                 unsafe extern "C" {
                     fn asm_vmx_host_rip();
                 }
-                vmwrite(
-                    vmcs_field::HOST_RIP,
-                    asm_vmx_host_rip as *const () as u64,
-                );
+                vmwrite(vmcs_field::HOST_RIP, asm_vmx_host_rip as *const () as u64);
             }
 
             let mut gpr_save = self.context.gprs;
@@ -266,13 +279,17 @@ mod x86_impl {
         }
 
         fn new_initialized(vmcb: Arc<Vmcb>, context: GuestContext, nptp: u64) -> Result<Self> {
+            println!("KVM: AmdGuestMode::new_initialized - calling svm_enter");
             crate::arch::guest::amd::svm::svm_enter()?;
+            println!("KVM: AmdGuestMode::new_initialized - svm_enter OK, calling prepare_for_run");
             vmcb.prepare_for_run()?;
+            println!("KVM: AmdGuestMode::new_initialized - prepare_for_run OK, calling initialize");
 
             // SAFETY: VMCB is valid and ready for initialization.
             unsafe {
                 vmcb.initialize(nptp)?;
             }
+            println!("KVM: AmdGuestMode::new_initialized - initialize OK");
 
             Ok(Self {
                 context,
@@ -289,8 +306,7 @@ mod x86_impl {
         where
             F: FnMut() -> bool,
         {
-            use crate::arch::guest::amd::vmcb::vmcb_offset;
-            use crate::arch::guest::amd::vmexit::SvmExitInfo;
+            use crate::arch::guest::amd::{vmcb::vmcb_offset, vmexit::SvmExitInfo};
 
             let _preempt_guard = disable_preempt();
 
@@ -365,8 +381,7 @@ mod x86_impl {
 
             // SAFETY: VMCB is valid.
             unsafe {
-                self.vmcb
-                    .write_u64(vmcb_offset::RIP, self.context.rip);
+                self.vmcb.write_u64(vmcb_offset::RIP, self.context.rip);
                 self.vmcb
                     .write_u64(vmcb_offset::RFLAGS, self.context.rflags);
                 self.vmcb
@@ -377,8 +392,15 @@ mod x86_impl {
                     .write_u64(vmcb_offset::CR3, self.context.sregs.cr3);
                 self.vmcb
                     .write_u64(vmcb_offset::CR4, self.context.sregs.cr4);
-                self.vmcb
-                    .write_u64(vmcb_offset::EFER, self.context.sregs.efer);
+                // Ensure SVME is always set in VMCB EFER.
+                // The outer hypervisor may reject the nested VMCB if EFER.SVME is 0,
+                // and the hardware requires SVME for VMRUN on bare metal.
+                let efer_svme = if crate::arch::guest::is_amd_cpu() {
+                    self.context.sregs.efer | (1 << 12)
+                } else {
+                    self.context.sregs.efer
+                };
+                self.vmcb.write_u64(vmcb_offset::EFER, efer_svme);
 
                 // Segment registers - write to VMCB using correct offsets
                 // matching the AMD64 APM vmcb_seg layout:
@@ -394,10 +416,12 @@ mod x86_impl {
                 Self::load_seg_vmcb(&self.vmcb, vmcb_offset::LDTR_SEL, &self.context.sregs.ldt);
 
                 // GDTR/IDTR
-                self.vmcb.write_u64(vmcb_offset::GDTR_BASE, self.context.sregs.gdt.base);
+                self.vmcb
+                    .write_u64(vmcb_offset::GDTR_BASE, self.context.sregs.gdt.base);
                 self.vmcb
                     .write_u32(vmcb_offset::GDTR_LIMIT, self.context.sregs.gdt.limit as u32);
-                self.vmcb.write_u64(vmcb_offset::IDTR_BASE, self.context.sregs.idt.base);
+                self.vmcb
+                    .write_u64(vmcb_offset::IDTR_BASE, self.context.sregs.idt.base);
                 self.vmcb
                     .write_u32(vmcb_offset::IDTR_LIMIT, self.context.sregs.idt.limit as u32);
             }
@@ -454,7 +478,13 @@ mod x86_impl {
                 self.context.sregs.cr0 = self.vmcb.read_u64(vmcb_offset::CR0);
                 self.context.sregs.cr3 = self.vmcb.read_u64(vmcb_offset::CR3);
                 self.context.sregs.cr4 = self.vmcb.read_u64(vmcb_offset::CR4);
-                self.context.sregs.efer = self.vmcb.read_u64(vmcb_offset::EFER);
+                let raw_efer = self.vmcb.read_u64(vmcb_offset::EFER);
+                // Strip SVME bit(s) on AMD so the guest sees a clean EFER.
+                self.context.sregs.efer = if crate::arch::guest::is_amd_cpu() {
+                    raw_efer & !(1 << 12)
+                } else {
+                    raw_efer
+                };
 
                 // Segment registers
                 Self::save_seg_vmcb(&self.vmcb, vmcb_offset::ES_SEL, &mut self.context.sregs.es);
@@ -464,7 +494,11 @@ mod x86_impl {
                 Self::save_seg_vmcb(&self.vmcb, vmcb_offset::FS_SEL, &mut self.context.sregs.fs);
                 Self::save_seg_vmcb(&self.vmcb, vmcb_offset::GS_SEL, &mut self.context.sregs.gs);
                 Self::save_seg_vmcb(&self.vmcb, vmcb_offset::TR_SEL, &mut self.context.sregs.tr);
-                Self::save_seg_vmcb(&self.vmcb, vmcb_offset::LDTR_SEL, &mut self.context.sregs.ldt);
+                Self::save_seg_vmcb(
+                    &self.vmcb,
+                    vmcb_offset::LDTR_SEL,
+                    &mut self.context.sregs.ldt,
+                );
 
                 // GDTR/IDTR
                 self.context.sregs.gdt.base = self.vmcb.read_u64(vmcb_offset::GDTR_BASE);

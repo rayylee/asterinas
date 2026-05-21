@@ -55,43 +55,40 @@ global_asm!(
     ".global __svm_vmrun",
     ".type __svm_vmrun, @function",
     "__svm_vmrun:",
-
     "    push rbp",
     "    push rbx",
     "    push r12",
     "    push r13",
     "    push r14",
     "    push r15",
-
-    "    push rdi",               // [rsp+48] GuestGprSaveArea ptr
-    "    push rsi",               // [rsp+40] ExitInfo ptr (not used in asm)
-    "    push rdx",               // [rsp+32] VMCB paddr
-
-    "    mov rbx, [rdi + 8]",    // guest rbx
-    "    mov rcx, [rdi + 16]",   // guest rcx
-    "    mov rdx, [rdi + 24]",   // guest rdx
-    "    mov rsi, [rdi + 32]",   // guest rsi
-    "    mov rbp, [rdi + 48]",   // guest rbp
-    "    mov r8,  [rdi + 56]",   // guest r8
-    "    mov r9,  [rdi + 64]",   // guest r9
-    "    mov r10, [rdi + 72]",   // guest r10
-    "    mov r11, [rdi + 80]",   // guest r11
-    "    mov r12, [rdi + 88]",   // guest r12
-    "    mov r13, [rdi + 96]",   // guest r13
-    "    mov r14, [rdi + 104]",  // guest r14
-    "    mov r15, [rdi + 112]",  // guest r15
-    "    mov rdi, [rdi + 40]",   // guest rdi
-
-    "    mov rax, [rsp + 32]",   // VMCB paddr
-
-    "    vmload",
+    "    push rdi",             // [rsp+16] GuestGprSaveArea ptr
+    "    push rsi",             // [rsp+8]  ExitInfo ptr (not used in asm)
+    "    push rdx",             // [rsp]    VMCB paddr
+    "    mov rbx, [rdi + 8]",   // guest rbx
+    "    mov rcx, [rdi + 16]",  // guest rcx
+    "    mov rdx, [rdi + 24]",  // guest rdx
+    "    mov rsi, [rdi + 32]",  // guest rsi
+    "    mov rbp, [rdi + 48]",  // guest rbp
+    "    mov r8,  [rdi + 56]",  // guest r8
+    "    mov r9,  [rdi + 64]",  // guest r9
+    "    mov r10, [rdi + 72]",  // guest r10
+    "    mov r11, [rdi + 80]",  // guest r11
+    "    mov r12, [rdi + 88]",  // guest r12
+    "    mov r13, [rdi + 96]",  // guest r13
+    "    mov r14, [rdi + 104]", // guest r14
+    "    mov r15, [rdi + 112]", // guest r15
+    "    mov rdi, [rdi + 40]",  // guest rdi
+    "    mov rax, [rsp]",       // VMCB paddr
+    // Disable global interrupts before vmrun.
+    // VMRUN automatically restores GIF on #VMEXIT.
+    // vmload/vmsave are omitted: guest MSRs (LSTAR, SF_MASK, etc.)
+    // are not modified, avoiding corruption from zero-initialized VMCB fields.
+    "    clgi",
     "    vmrun",
-
-    // #VMEXIT lands here. RAX restored from HSA.
-    "    mov rax, [rsp + 32]",   // Reload VMCB paddr from stack
-    "    vmsave",
-
-    "    mov rax, [rsp + 48]",   // rax = GuestGprSaveArea ptr
+    // #VMEXIT lands here. GIF=0 (cleared by hardware on #VMEXIT).
+    // RAX has been restored from HSA (host RAX value).
+    "    stgi",
+    "    mov rax, [rsp + 16]", // rax = GuestGprSaveArea ptr
     "    mov [rax + 8], rbx",
     "    mov [rax + 16], rcx",
     "    mov [rax + 24], rdx",
@@ -106,9 +103,7 @@ global_asm!(
     "    mov [rax + 96], r13",
     "    mov [rax + 104], r14",
     "    mov [rax + 112], r15",
-
     "    xor eax, eax",
-
     "    add rsp, 3*8",
     "    pop r15",
     "    pop r14",

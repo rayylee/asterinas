@@ -9,10 +9,10 @@
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::{
+    Error,
     cpu::CpuId,
     mm::{FrameAllocOptions, UFrame, paddr_to_vaddr},
     prelude::*,
-    Error,
 };
 
 /// A VMCB (Virtual Machine Control Block).
@@ -150,24 +150,24 @@ impl Vmcb {
 
         // SAFETY: Writing to valid VMCB offsets.
         unsafe {
-            // First intercept vector (offset 0x400):
-            // Bit 0:   INTR (external interrupt) - do NOT intercept
-            // Bit 1:   NMI - intercept
-            // Bit 3:   INVLPG - intercept
-            // Bit 4:   CPUID - intercept
-            // Bit 5:   HLT - intercept
-            // Bit 6:   INVD - intercept
-            // Bit 7:   HLT - intercept
-            // Bit 8:   INVLPG - intercept
-            // For now: intercept CPUID, HLT, IO, MSR, CR access, etc.
-            self.write_u64(0x400, 0);
-
-            // Enable CPUID (bit 4), HLT (bit 5), IO (bit 12), MSR (bit 28) intercepts
-            self.write_u64(0x400,
-                (1 << 4)  | // CPUID
-                (1 << 5)  | // HLT
-                (1 << 12) | // IN/OUT
-                (1 << 28)   // MSR
+            // First intercept vector (offset 0x400, 64-bit).
+            // AMD APM Vol 2, Table 15-4:
+            //   Bit  0: INTR           Bit  8: INVLPGA
+            //   Bit  1: NMI            Bit  9: IOIO
+            //   Bit  2: SMI            Bit 10: MSR
+            //   Bit  3: INIT           Bit 11: TASK_SWITCH
+            //   Bit  4: VMRUN          Bit 12: FERR_FREEZE
+            //   Bit  5: CPUID          Bit 13: SHUTDOWN
+            //   Bit  6: HLT            Bit 14: VMLOAD
+            //   Bit  7: INVD           Bit 15: VMSAVE
+            //                          Bit 16: VMMCALL
+            self.write_u64(
+                0x400,
+                (1 << 5)  | // CPUID
+                (1 << 6)  | // HLT
+                (1 << 9)  | // IOIO
+                (1 << 10) | // MSR
+                (1 << 16), // VMMCALL
             );
 
             // Intercept CR accesses: CR0, CR3, CR4 reads/writes at offset 0x408
@@ -241,29 +241,29 @@ impl Vmcb {
         // This differs from VMCS ar_bytes where avl/l/db/g are bits 12-15.
         // In SVM, avl/l/db/g are bits 11-14.
         unsafe {
-            // CS: Selector=0x08, Limit=0xFFFFFFFF, Attr=0x509B, Base=0
-            // SVM attr 0x509B = type=B, s=1, p=1, l=1, g=1 (64-bit code segment)
+            // CS: Selector=0x08, Limit=0xFFFFFFFF, Attr=0x609B, Base=0
+            // SVM attr 0x609B = type=B, s=1, p=1, l=0, db=1, g=1 (32-bit code segment)
             self.write_u16(vmcb_offset::CS_SEL, 0x08);
-            self.write_u16(vmcb_offset::CS_ATTR, 0x509B);
+            self.write_u16(vmcb_offset::CS_ATTR, 0x609B);
             self.write_u32(vmcb_offset::CS_LIMIT, 0xFFFFFFFF);
             self.write_u64(vmcb_offset::CS_BASE, 0);
 
             // ES: data segment
-            // SVM attr 0x2093 = type=3, s=1, p=1, db=1, g=1 (data segment)
+            // SVM attr 0x6093 = type=3, s=1, p=1, l=0, db=1, g=1 (32-bit data segment)
             self.write_u16(vmcb_offset::ES_SEL, 0x10);
-            self.write_u16(vmcb_offset::ES_ATTR, 0x2093);
+            self.write_u16(vmcb_offset::ES_ATTR, 0x6093);
             self.write_u32(vmcb_offset::ES_LIMIT, 0xFFFFFFFF);
             self.write_u64(vmcb_offset::ES_BASE, 0);
 
             // DS: data segment
             self.write_u16(vmcb_offset::DS_SEL, 0x10);
-            self.write_u16(vmcb_offset::DS_ATTR, 0x2093);
+            self.write_u16(vmcb_offset::DS_ATTR, 0x6093);
             self.write_u32(vmcb_offset::DS_LIMIT, 0xFFFFFFFF);
             self.write_u64(vmcb_offset::DS_BASE, 0);
 
             // SS: data segment
             self.write_u16(vmcb_offset::SS_SEL, 0x10);
-            self.write_u16(vmcb_offset::SS_ATTR, 0x2093);
+            self.write_u16(vmcb_offset::SS_ATTR, 0x6093);
             self.write_u32(vmcb_offset::SS_LIMIT, 0xFFFFFFFF);
             self.write_u64(vmcb_offset::SS_BASE, 0);
 
@@ -276,8 +276,8 @@ impl Vmcb {
             // RFLAGS (offset 0x278)
             self.write_u64(0x278, (1 << 1) | (1 << 9)); // IF=1, always 1
 
-            // CR0 (offset 0x230): PE + NE + WP + PG + MP + ET
-            let cr0 = (1 << 0) | (1 << 2) | (1 << 5) | (1 << 16) | (1 << 18) | (1 << 29) | (1 << 30);
+            // CR0 (offset 0x230): PE + MP + ET + NE + WP
+            let cr0 = (1 << 0) | (1 << 1) | (1 << 4) | (1 << 5) | (1 << 16);
             self.write_u64(0x230, cr0);
 
             // CR2 (offset 0x238)
@@ -286,12 +286,11 @@ impl Vmcb {
             // CR3 (offset 0x240)
             self.write_u64(0x240, 0);
 
-            // CR4 (offset 0x248): PAE + OSFXSR + OSXMMEXCPT + OSXSAVE + VME
-            let cr4 = (1 << 0) | (1 << 4) | (1 << 7) | (1 << 9) | (1 << 10);
-            self.write_u64(0x248, cr4);
+            // CR4 (offset 0x248): 0 (no paging features)
+            self.write_u64(0x248, 0);
 
-            // EFER (offset 0x250): LME + LMA + NXE + SVME
-            let efer = (1 << 0) | (1 << 8) | (1 << 10) | (1 << 12);
+            // EFER (offset 0x250): SCE + SVME (no LME/LMA — added by VMM for long mode)
+            let efer = (1 << 0) | (1 << 12);
             self.write_u64(0x250, efer);
         }
 
@@ -416,20 +415,18 @@ pub(crate) mod vmcb_offset {
     pub const GS_LIMIT: u16 = 0x054;
     pub const GS_BASE: u16 = 0x058;
 
-    pub const GDTR_SEL: u16 = 0x060;
-    pub const GDTR_ATTR: u16 = 0x062;
-    pub const GDTR_LIMIT: u16 = 0x064;
-    pub const GDTR_BASE: u16 = 0x068;
+    // GDTR/IDTR are base (u64) + limit (u32) pairs (not segment-style 16-byte entries).
+    pub const GDTR_BASE: u16 = 0x060;
+    pub const GDTR_LIMIT: u16 = 0x068;
 
-    pub const LDTR_SEL: u16 = 0x070;
-    pub const LDTR_ATTR: u16 = 0x072;
-    pub const LDTR_LIMIT: u16 = 0x074;
-    pub const LDTR_BASE: u16 = 0x078;
+    pub const IDTR_BASE: u16 = 0x070;
+    pub const IDTR_LIMIT: u16 = 0x078;
 
-    pub const IDTR_SEL: u16 = 0x080;
-    pub const IDTR_ATTR: u16 = 0x082;
-    pub const IDTR_LIMIT: u16 = 0x084;
-    pub const IDTR_BASE: u16 = 0x088;
+    // LDTR and TR are 16-byte segment-style entries (selector, attrib, limit, base).
+    pub const LDTR_SEL: u16 = 0x080;
+    pub const LDTR_ATTR: u16 = 0x082;
+    pub const LDTR_LIMIT: u16 = 0x084;
+    pub const LDTR_BASE: u16 = 0x088;
 
     pub const TR_SEL: u16 = 0x090;
     pub const TR_ATTR: u16 = 0x092;

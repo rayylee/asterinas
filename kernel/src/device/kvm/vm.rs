@@ -7,8 +7,11 @@
 
 use core::fmt::Display;
 
-use ostd::guest::{GuestDtable, GuestPageFlags, GuestPageProperty, GuestPhysMemSpace, GuestSegment};
-use ostd::task::{disable_preempt, Task};
+use ostd::{
+    guest::{GuestDtable, GuestPageFlags, GuestPageProperty, GuestPhysMemSpace, GuestSegment},
+    mm::HasPaddr,
+    task::{Task, disable_preempt},
+};
 
 use crate::{
     device::kvm::vcpu::KvmVcpu,
@@ -21,6 +24,7 @@ use crate::{
     prelude::*,
     process::signal::{PollHandle, Pollable},
     util::ioctl::{RawIoctl, dispatch_ioctl},
+    vm::page_cache::VmoOptions,
 };
 
 const PAGE_SIZE: u64 = 4096;
@@ -56,7 +60,9 @@ impl KvmVm {
         let thread_local = task.as_thread_local().unwrap();
         let file_table = thread_local.borrow_file_table();
         let mut file_table_locked = file_table.unwrap().write();
-        let fd: u32 = file_table_locked.insert(Arc::new(vm_file), FdFlags::empty()).into();
+        let fd: u32 = file_table_locked
+            .insert(Arc::new(vm_file), FdFlags::empty())
+            .into();
         Ok(fd)
     }
 
@@ -74,6 +80,8 @@ impl KvmVm {
             return Ok(());
         }
 
+        println!("KVM: SET_USER_MEMORY_REGION start");
+
         // Map each page from the user VmSpace into the guest EPT.
         let preempt_guard = disable_preempt();
         let prop = GuestPageProperty {
@@ -81,40 +89,76 @@ impl KvmVm {
             mem_type: 6, // WB
         };
 
+        let gpa_start = region.guest_phys_addr;
+        let gpa_end = region.guest_phys_addr + region.memory_size;
+        let gpa_range = gpa_start..gpa_end;
+        let mut ept_cursor = self.phys_mem.cursor_mut(&preempt_guard, &gpa_range)?;
+
+        let va_start = region.userspace_addr as usize;
+
+        // Use a single VA cursor for the entire range, advancing page-by-page.
         let task = Task::current().unwrap();
         let thread_local = task.as_thread_local().unwrap();
         let vmar_borrow = thread_local.vmar().borrow();
         let vm_space = vmar_borrow.as_ref().unwrap().vm_space();
 
-        let gpa_range = region.guest_phys_addr..(region.guest_phys_addr + region.memory_size);
-        let mut ept_cursor = self.phys_mem.cursor_mut(&preempt_guard, &gpa_range)?;
-
-        let va_range =
-            region.userspace_addr as usize..(region.userspace_addr + region.memory_size) as usize;
+        let total_size = region.memory_size as usize;
+        let va_range = va_start..va_start + total_size;
         let mut va_cursor = vm_space.cursor(&preempt_guard, &va_range)?;
 
-        let mut gpa = region.guest_phys_addr;
-        loop {
-            let (_, item) = va_cursor.query()?;
-            match item {
-                Some(ref item) => {
-                    ept_cursor.map_vm_item(item, 1, prop);
+        let mut gpa = gpa_start;
+        while gpa < gpa_end {
+            let cur_va = va_cursor.virt_addr();
+            let (range, item) = va_cursor.query()?;
+
+            // Process all 4KB pages within this entry that overlap our region.
+            let entry_start = range.start.max(va_start);
+            let entry_end = range.end.min(va_start + total_size);
+            let mut page_va = if cur_va > entry_start {
+                cur_va
+            } else {
+                entry_start
+            };
+
+            while page_va < entry_end && gpa < gpa_end {
+                let offset = page_va - range.start;
+                match item {
+                    Some(ref vm_item) => {
+                        let paddr = vm_item.paddr() + offset;
+                        ept_cursor.map_paddr(paddr, 1, prop);
+                    }
+                    None => {
+                        // Page not yet mapped in user space. Allocate a fresh
+                        // zeroed frame and map it into the EPT.
+                        // Do NOT use map_zero() — it maps paddr 0 which is real
+                        // physical memory and would corrupt the kernel if the
+                        // guest writes to it.
+                        let zero_vmo = VmoOptions::new(PAGE_SIZE as usize)
+                            .alloc()
+                            .map_err(|_| Error::new(Errno::ENOMEM))?;
+                        let frame = zero_vmo
+                            .commit_on(0)
+                            .map_err(|_| Error::new(Errno::ENOMEM))?;
+                        ept_cursor.map_paddr(frame.paddr(), 1, prop);
+                    }
                 }
-                None => {
-                    // Page not yet mapped in user space. Map a zero page as placeholder.
-                    ept_cursor.map_zero(1, prop);
-                }
+                page_va += PAGE_SIZE as usize;
+                gpa += PAGE_SIZE;
             }
 
-            gpa += PAGE_SIZE;
-            if gpa >= region.guest_phys_addr + region.memory_size {
-                break;
+            // Advance the cursor to the end of this entry
+            if gpa < gpa_end {
+                let remaining_in_entry = range.end - va_cursor.virt_addr();
+                if remaining_in_entry >= PAGE_SIZE as usize {
+                    let _ = va_cursor.find_next(remaining_in_entry);
+                } else {
+                    break;
+                }
             }
-            let _ = va_cursor.find_next(1);
-            // ept_cursor advances automatically after map()
         }
 
         self.mem_regions.lock().push(*region);
+        println!("KVM: SET_USER_MEMORY_REGION done");
         Ok(())
     }
 
@@ -129,7 +173,9 @@ impl KvmVm {
         let thread_local = AsThreadLocal::as_thread_local(&task).unwrap();
         let file_table = thread_local.borrow_file_table();
         let mut file_table_locked = file_table.unwrap().write();
-        let fd: u32 = file_table_locked.insert(Arc::new(vcpu_file), FdFlags::empty()).into();
+        let fd: u32 = file_table_locked
+            .insert(Arc::new(vcpu_file), FdFlags::empty())
+            .into();
         Ok(fd)
     }
 }
@@ -160,21 +206,25 @@ impl FileLike for KvmVmFile {
 
         dispatch_ioctl!(match raw_ioctl {
             cmd @ CreateVcpu => {
+                println!("KVM: CREATE_VCPU");
                 let vcpu_id = cmd.get() as u32;
                 let fd = self.vm.create_vcpu(vcpu_id)?;
                 Ok(fd as i32)
             }
             cmd @ SetUserMemoryRegion => {
-                let region = cmd.read()?;
+                println!("KVM: SET_USER_MEMORY_REGION ioctl");
+                let region: KvmUserspaceMemoryRegion = cmd.read()?;
                 self.vm.set_user_memory_region(&region)?;
                 Ok(0)
             }
             cmd @ SetTssAddr => {
+                println!("KVM: SET_TSS_ADDR");
                 let addr = cmd.get();
                 *self.vm.tss_addr.lock() = Some(addr);
                 Ok(0)
             }
             _cmd @ SetIdentityMapAddr => {
+                println!("KVM: SET_IDENTITY_MAP_ADDR");
                 // No-op: just acknowledge the ioctl.
                 Ok(0)
             }
@@ -298,10 +348,12 @@ impl FileLike for KvmVcpuFile {
 
         dispatch_ioctl!(match raw_ioctl {
             _cmd @ Run => {
+                println!("KVM: RUN");
                 self.vcpu.run()?;
                 Ok(0)
             }
             cmd @ GetRegs => {
+                println!("KVM: GET_REGS");
                 let ctx = self.vcpu.guest_context().lock();
                 let regs = KvmRegs {
                     rax: ctx.gprs.rax,
@@ -327,6 +379,7 @@ impl FileLike for KvmVcpuFile {
                 Ok(0)
             }
             cmd @ SetRegs => {
+                println!("KVM: SET_REGS");
                 let regs: KvmRegs = cmd.read()?;
                 let mut ctx = self.vcpu.guest_context().lock();
                 ctx.gprs.rax = regs.rax;
@@ -350,6 +403,7 @@ impl FileLike for KvmVcpuFile {
                 Ok(0)
             }
             cmd @ GetSregs => {
+                println!("KVM: GET_SREGS");
                 let ctx = self.vcpu.guest_context().lock();
                 let sregs = KvmSregs {
                     cs: guest_seg_to_kvm(&ctx.sregs.cs),
@@ -375,6 +429,7 @@ impl FileLike for KvmVcpuFile {
                 Ok(0)
             }
             cmd @ SetSregs => {
+                println!("KVM: SET_SREGS");
                 let sregs: KvmSregs = cmd.read()?;
                 let mut ctx = self.vcpu.guest_context().lock();
                 ctx.sregs.cs = kvm_seg_to_guest(&sregs.cs);

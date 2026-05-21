@@ -29,8 +29,8 @@ global_asm!(
     ".type asm_vmxon, @function",
     "asm_vmxon:",
     "    vmxon [rdi]",
-    "    setb al",          // CF=1 -> error
-    "    setz cl",          // ZF=1 -> failed
+    "    setb al", // CF=1 -> error
+    "    setz cl", // ZF=1 -> failed
     "    shl cl, 1",
     "    or al, cl",
     "    movzx eax, al",
@@ -129,7 +129,6 @@ global_asm!(
     ".global __vmx_enter_guest_v2",
     ".type __vmx_enter_guest_v2, @function",
     "__vmx_enter_guest_v2:",
-
     // Input: rdi = &GuestGprSaveArea, rsi = &VmxExitInfo, edx = launch_flag
     //   launch_flag: 0 = VMLAUNCH (first entry), nonzero = VMRESUME
 
@@ -140,35 +139,31 @@ global_asm!(
     "    push r13",
     "    push r14",
     "    push r15",
-
     // Save host pointers and launch flag on the stack
-    "    push rdi",               // [rsp+48] GuestGprSaveArea ptr
-    "    push rsi",               // [rsp+40] VmxExitInfo ptr
-    "    push rdx",               // [rsp+32] launch flag
-
+    "    push rdi", // [rsp+48] GuestGprSaveArea ptr
+    "    push rsi", // [rsp+40] VmxExitInfo ptr
+    "    push rdx", // [rsp+32] launch flag
     // Set HOST_RSP in VMCS (RSP after pushes = current RSP)
-    "    mov rdi, 0x6C14",        // HOST_RSP encoding
+    "    mov rdi, 0x6C14", // HOST_RSP encoding
     "    mov rsi, rsp",
     "    vmwrite rdi, rsi",
-
     // Load guest GPRs from save area
-    "    mov rdi, [rsp + 48]",    // Reload GuestGprSaveArea ptr
-    "    mov rax, [rdi + 0]",    // guest rax
-    "    mov rbx, [rdi + 8]",    // guest rbx
-    "    mov rcx, [rdi + 16]",   // guest rcx
-    "    mov rdx, [rdi + 24]",   // guest rdx
-    "    mov rbp, [rdi + 48]",   // guest rbp
-    "    mov r8,  [rdi + 56]",   // guest r8
-    "    mov r9,  [rdi + 64]",   // guest r9
-    "    mov r10, [rdi + 72]",   // guest r10
-    "    mov r11, [rdi + 80]",   // guest r11
-    "    mov r12, [rdi + 88]",   // guest r12
-    "    mov r13, [rdi + 96]",   // guest r13
-    "    mov r14, [rdi + 104]",  // guest r14
-    "    mov r15, [rdi + 112]",  // guest r15
-    "    mov rsi, [rdi + 32]",   // guest rsi
-    "    mov rdi, [rdi + 40]",   // guest rdi (last, since we needed it as base ptr)
-
+    "    mov rdi, [rsp + 48]",  // Reload GuestGprSaveArea ptr
+    "    mov rax, [rdi + 0]",   // guest rax
+    "    mov rbx, [rdi + 8]",   // guest rbx
+    "    mov rcx, [rdi + 16]",  // guest rcx
+    "    mov rdx, [rdi + 24]",  // guest rdx
+    "    mov rbp, [rdi + 48]",  // guest rbp
+    "    mov r8,  [rdi + 56]",  // guest r8
+    "    mov r9,  [rdi + 64]",  // guest r9
+    "    mov r10, [rdi + 72]",  // guest r10
+    "    mov r11, [rdi + 80]",  // guest r11
+    "    mov r12, [rdi + 88]",  // guest r12
+    "    mov r13, [rdi + 96]",  // guest r13
+    "    mov r14, [rdi + 104]", // guest r14
+    "    mov r15, [rdi + 112]", // guest r15
+    "    mov rsi, [rdi + 32]",  // guest rsi
+    "    mov rdi, [rdi + 40]",  // guest rdi (last, since we needed it as base ptr)
     // VMLAUNCH or VMRESUME based on launch flag
     "    cmp qword ptr [rsp + 32], 0",
     "    jne .Lvmx_do_vmresume",
@@ -176,15 +171,12 @@ global_asm!(
     "    jmp .Lvmx_check_entry_result",
     ".Lvmx_do_vmresume:",
     "    vmresume",
-
     ".Lvmx_check_entry_result:",
     // If VM entry failed (CF=1 or ZF=1 after vmresume/vmlaunch), we land here
     // because the instruction failed -- no VM exit occurred.
     // But if VM entry succeeded, we never reach here.
-
-    "    mov rdi, [rsp + 48]",    // GuestGprSaveArea ptr
-    "    mov rsi, [rsp + 40]",    // VmxExitInfo ptr
-
+    "    mov rdi, [rsp + 48]", // GuestGprSaveArea ptr
+    "    mov rsi, [rsp + 40]", // VmxExitInfo ptr
     // Save the guest GPRs back to save area
     "    mov [rdi + 0], rax",
     "    mov [rdi + 8], rbx",
@@ -200,12 +192,10 @@ global_asm!(
     "    mov [rdi + 96], r13",
     "    mov [rdi + 104], r14",
     "    mov [rdi + 112], r15",
-
     // Write entry failure info
-    "    mov eax, 0x4400",       // VM_INSTRUCTION_ERROR
+    "    mov eax, 0x4400", // VM_INSTRUCTION_ERROR
     "    vmread rax, rax",
-    "    mov [rsi], eax",         // exit_reason
-
+    "    mov [rsi], eax", // exit_reason
     // Return failure (1)
     "    mov eax, 1",
     // Clean up stack
@@ -217,7 +207,6 @@ global_asm!(
     "    pop rbx",
     "    pop rbp",
     "    ret",
-
     // ---- VM exit handler ----
     ".balign 16",
     ".global asm_vmx_host_rip",
@@ -229,10 +218,8 @@ global_asm!(
 
     // Save guest rax first (we need a register to hold the save area ptr)
     "    mov [rsp + 32], rax",
-
     // Now rax is free. Load save area ptr into rax.
-    "    mov rax, [rsp + 48]",    // rax = GuestGprSaveArea ptr
-
+    "    mov rax, [rsp + 48]", // rax = GuestGprSaveArea ptr
     // Save guest GPRs to save area
     "    mov [rax + 8], rbx",
     "    mov [rax + 16], rcx",
@@ -247,37 +234,28 @@ global_asm!(
     "    mov [rax + 96], r13",
     "    mov [rax + 104], r14",
     "    mov [rax + 112], r15",
-
     // Save guest rdi
     "    mov [rax + 40], rdi",
-
     // Now restore guest rax from the stack slot we used as temp storage
-    "    mov rdx, [rsp + 32]",    // rdx = guest rax (temp)
-    "    mov [rax + 0], rdx",     // save guest rax to save area
-
+    "    mov rdx, [rsp + 32]", // rdx = guest rax (temp)
+    "    mov [rax + 0], rdx",  // save guest rax to save area
     // Now we can use rdi for VmxExitInfo
-    "    mov rdi, [rsp + 40]",    // rdi = VmxExitInfo ptr
-
+    "    mov rdi, [rsp + 40]", // rdi = VmxExitInfo ptr
     // Read exit info from VMCS
-    "    mov rsi, 0x4402",        // VM_EXIT_REASON
+    "    mov rsi, 0x4402", // VM_EXIT_REASON
     "    vmread rax, rsi",
-    "    mov [rdi], eax",          // Store exit_reason
-
-    "    mov rsi, 0x4404",        // VM_EXIT_INTR_INFO
+    "    mov [rdi], eax",  // Store exit_reason
+    "    mov rsi, 0x4404", // VM_EXIT_INTR_INFO
     "    vmread rax, rsi",
-    "    mov [rdi + 4], eax",     // Store exit_intr_info
-
-    "    mov rsi, 0x6400",        // EXIT_QUALIFICATION
+    "    mov [rdi + 4], eax", // Store exit_intr_info
+    "    mov rsi, 0x6400",    // EXIT_QUALIFICATION
     "    vmread rax, rsi",
-    "    mov [rdi + 8], rax",     // Store exit_qualification
-
-    "    mov rsi, 0x2400",        // GUEST_PHYSICAL_ADDRESS
+    "    mov [rdi + 8], rax", // Store exit_qualification
+    "    mov rsi, 0x2400",    // GUEST_PHYSICAL_ADDRESS
     "    vmread rax, rsi",
-    "    mov [rdi + 16], rax",    // Store guest_physical_address
-
+    "    mov [rdi + 16], rax", // Store guest_physical_address
     // Return success (0)
     "    xor eax, eax",
-
     // Clean up stack
     "    add rsp, 3*8",
     "    pop r15",

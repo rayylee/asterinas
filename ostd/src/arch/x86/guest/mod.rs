@@ -11,27 +11,29 @@
 pub mod amd;
 pub(crate) mod context;
 pub mod intel;
+pub(crate) mod msr_probe;
 pub(crate) mod vmexit;
 
 use core::ops::Range;
 
-use crate::mm::{
-    PagingLevel,
-    page_prop::{CachePolicy, PageFlags, PageProperty},
-    vm_space::VmQueriedItem,
-};
-use crate::prelude::*;
-use crate::task::atomic_mode::AsAtomicModeGuard;
-
 // Re-export shared public types
 pub use context::{GuestContext, GuestDtable, GuestGprSaveArea, GuestSegment, GuestSregs};
+// Re-export Intel-specific types (still used by kernel for now)
+pub use intel::{EptPageFlags, EptPageProperty};
 pub use vmexit::{
     CpuidAccess, EptViolationInfo, FailEntryInfo, GuestExitReason, IoPortAccess, MmioAccess,
     MsrAccess,
 };
 
-// Re-export Intel-specific types (still used by kernel for now)
-pub use intel::{EptPageFlags, EptPageProperty};
+use crate::{
+    mm::{
+        PagingLevel,
+        page_prop::{CachePolicy, PageFlags, PageProperty},
+        vm_space::VmQueriedItem,
+    },
+    prelude::*,
+    task::atomic_mode::AsAtomicModeGuard,
+};
 
 /// Vendor-agnostic page property for guest physical memory mappings.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -242,11 +244,29 @@ impl GuestCursorMut<'_> {
     }
 
     /// Maps an item from a VmSpace query result into the guest page tables.
-    pub fn map_vm_item(&mut self, item: &VmQueriedItem<'_>, level: PagingLevel, prop: GuestPageProperty) {
+    pub fn map_vm_item(
+        &mut self,
+        item: &VmQueriedItem<'_>,
+        level: PagingLevel,
+        prop: GuestPageProperty,
+    ) {
         let page_prop = prop.to_page_property();
         match self {
             GuestCursorMut::Intel(cursor) => cursor.map_vm_item(item, level, page_prop),
             GuestCursorMut::Amd(cursor) => cursor.map_vm_item(item, level, page_prop),
+        }
+    }
+
+    /// Maps a physical address at the current GPA.
+    ///
+    /// This is useful when mapping a 4KB page from within a huge page entry,
+    /// where the physical address needs to be adjusted by the offset within
+    /// the huge page.
+    pub fn map_paddr(&mut self, paddr: Paddr, level: PagingLevel, prop: GuestPageProperty) {
+        let page_prop = prop.to_page_property();
+        match self {
+            GuestCursorMut::Intel(cursor) => cursor.map_paddr(paddr, level, page_prop),
+            GuestCursorMut::Amd(cursor) => cursor.map_paddr(paddr, level, page_prop),
         }
     }
 

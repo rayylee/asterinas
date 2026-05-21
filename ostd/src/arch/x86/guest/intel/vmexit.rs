@@ -4,12 +4,8 @@
 //!
 //! Provides VMX-specific exit decoding using shared `GuestExitReason`.
 
-use crate::arch::guest::{
-    CpuidAccess, EptViolationInfo, GuestExitReason, IoPortAccess,
-    MsrAccess,
-};
-
 use super::vmx::exit_reason;
+use crate::arch::guest::{CpuidAccess, EptViolationInfo, GuestExitReason, IoPortAccess, MsrAccess};
 
 /// Raw exit info populated by the Intel VMX assembly VM exit handler.
 #[repr(C)]

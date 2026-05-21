@@ -6,19 +6,22 @@
 //! physical addresses (GPAs) to host physical addresses (HPAs).
 //! This is the AMD equivalent of Intel's EPT.
 
-use core::marker::PhantomData;
-use core::ops::Range;
+use core::{marker::PhantomData, ops::Range};
 
 use bitflags::bitflags;
 
-use crate::mm::{
-    HasPaddr, Paddr, PagingConstsTrait, PagingLevel, PodOnce, Vaddr,
-    page_prop::{CachePolicy, PageFlags, PageProperty, PageTableFlags, PrivilegedPageFlags as PrivFlags},
-    page_table::{PageTable, PageTableConfig, PteScalar, PteTrait, CursorMut},
-    vm_space::VmQueriedItem,
+use crate::{
+    mm::{
+        HasPaddr, Paddr, PagingConstsTrait, PagingLevel, PodOnce, Vaddr,
+        page_prop::{
+            CachePolicy, PageFlags, PageProperty, PageTableFlags, PrivilegedPageFlags as PrivFlags,
+        },
+        page_table::{CursorMut, PageTable, PageTableConfig, PteScalar, PteTrait},
+        vm_space::VmQueriedItem,
+    },
+    prelude::Result,
+    task::atomic_mode::AsAtomicModeGuard,
 };
-use crate::prelude::Result;
-use crate::task::atomic_mode::AsAtomicModeGuard;
 
 /// NPT paging constants.
 ///
@@ -310,10 +313,13 @@ impl GuestPhysMemSpace {
 
     /// Returns the NPT pointer value (nCR3) for VMCB initialization.
     ///
-    /// The nCR3 format is just the physical address of the top-level NPT
-    /// page table (PML4), with no special flags (unlike EPTP).
+    /// nCR3 format (VMCB offset 0x450):
+    ///   Bit 0:     NP_ENABLE (must be 1 to enable nested paging)
+    ///   Bits 11:1: Reserved (0)
+    ///   Bits 63:12: NPT root physical address
     pub fn nptp(&self) -> u64 {
-        self.npt.root_paddr() as u64
+        let root_paddr = self.npt.root_paddr() as u64;
+        root_paddr | 1 // NP_ENABLE
     }
 }
 
@@ -335,12 +341,7 @@ impl GuestCursorMut<'_> {
         unsafe { self.pt_cursor.map((paddr, level, prop)) };
     }
 
-    pub fn map_frame(
-        &mut self,
-        frame: &impl HasPaddr,
-        level: PagingLevel,
-        prop: PageProperty,
-    ) {
+    pub fn map_frame(&mut self, frame: &impl HasPaddr, level: PagingLevel, prop: PageProperty) {
         let paddr = frame.paddr();
         // SAFETY: The frame type guarantees a valid physical address.
         unsafe { self.pt_cursor.map((paddr, level, prop)) };
@@ -369,6 +370,11 @@ impl GuestCursorMut<'_> {
                 unsafe { self.pt_cursor.map((*paddr, level, prop)) };
             }
         }
+    }
+
+    pub fn map_paddr(&mut self, paddr: Paddr, level: PagingLevel, prop: PageProperty) {
+        // SAFETY: The caller is responsible for ensuring the physical address is valid.
+        unsafe { self.pt_cursor.map((paddr, level, prop)) };
     }
 
     pub fn find_next(&mut self, len: usize) -> Option<u64> {

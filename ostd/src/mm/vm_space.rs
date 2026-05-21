@@ -608,6 +608,14 @@ impl VmQueriedItem<'_> {
             Self::MappedIoMem { prop, .. } => prop,
         }
     }
+
+    /// Returns the physical address of the start of the mapped item.
+    pub fn paddr(&self) -> Paddr {
+        match self {
+            Self::MappedRam { frame, .. } => frame.paddr(),
+            Self::MappedIoMem { paddr, .. } => *paddr,
+        }
+    }
 }
 
 /// Internal representation of a VM item.

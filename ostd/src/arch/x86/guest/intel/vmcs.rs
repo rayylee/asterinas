@@ -8,14 +8,13 @@
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use super::vmx::{
-    VmxResult, vmwrite, vmptrld, vmclear,
-    vmx_capabilities, adjust_vmx_control, vmcs_field,
+    VmxResult, adjust_vmx_control, vmclear, vmcs_field, vmptrld, vmwrite, vmx_capabilities,
 };
 use crate::{
+    Error,
     cpu::CpuId,
     mm::{FrameAllocOptions, UFrame, paddr_to_vaddr},
     prelude::*,
-    Error,
 };
 
 /// A VMCS (Virtual Machine Control Structure).
@@ -81,6 +80,12 @@ impl Vmcs {
     pub unsafe fn load_on_current_cpu(&self) -> Result<()> {
         let current_cpu: u32 = CpuId::current_racy().into();
         let prev_cpu = self.loaded_cpu.load(Ordering::Acquire);
+        println!(
+            "KVM: load_on_current_cpu - current={}, prev={}, paddr={:#x}",
+            current_cpu,
+            prev_cpu,
+            self.paddr()
+        );
 
         if prev_cpu == current_cpu {
             return Ok(());
@@ -91,6 +96,7 @@ impl Vmcs {
             // SAFETY: The VMCS was loaded on the previous CPU.
             let result = unsafe { vmclear(self.paddr()) };
             if result != VmxResult::Ok {
+                println!("KVM: load_on_current_cpu - vmclear FAILED");
                 return Err(Error::IoError);
             }
         }
@@ -98,9 +104,14 @@ impl Vmcs {
         // SAFETY: The VMCS region is properly initialized, and we are in VMX root mode.
         let result = unsafe { vmptrld(self.paddr()) };
         if result != VmxResult::Ok {
+            println!(
+                "KVM: load_on_current_cpu - vmptrld FAILED, result={:?}",
+                result
+            );
             return Err(Error::IoError);
         }
 
+        println!("KVM: load_on_current_cpu - vmptrld OK");
         self.loaded_cpu.store(current_cpu, Ordering::Release);
         Ok(())
     }
@@ -126,12 +137,20 @@ impl Vmcs {
     ///
     /// The caller must ensure this VMCS is loaded on the current CPU.
     pub unsafe fn initialize(&self, eptp: u64) -> Result<()> {
+        println!("KVM: vmcs.initialize - starting, eptp={:#x}", eptp);
         let caps = vmx_capabilities();
 
         // SAFETY: VMCS is loaded on the current CPU.
+        println!("KVM: vmcs.initialize - calling init_host_state");
         unsafe {
             self.init_host_state()?;
+        }
+        println!("KVM: vmcs.initialize - calling init_controls");
+        unsafe {
             self.init_controls(caps)?;
+        }
+        println!("KVM: vmcs.initialize - calling init_guest_state");
+        unsafe {
             self.init_guest_state()?;
         }
 
@@ -139,6 +158,7 @@ impl Vmcs {
         unsafe {
             vmwrite(vmcs_field::EPT_POINTER, eptp);
         }
+        println!("KVM: vmcs.initialize - done");
 
         Ok(())
     }
@@ -149,8 +169,10 @@ impl Vmcs {
     ///
     /// VMCS must be loaded on current CPU.
     unsafe fn init_host_state(&self) -> Result<()> {
-        use x86_64::registers::control::{Cr0, Cr3, Cr4};
-        use x86_64::registers::segmentation::{CS, SS, DS, ES, FS, GS, Segment};
+        use x86_64::registers::{
+            control::{Cr0, Cr3, Cr4},
+            segmentation::{CS, DS, ES, FS, GS, SS, Segment},
+        };
 
         // Host CR0, CR3, CR4
         let cr0 = Cr0::read_raw();
@@ -170,7 +192,9 @@ impl Vmcs {
         let gs = GS::get_reg();
         let tr: u64;
         // SAFETY: The STR instruction reads the Task Register selector.
-        unsafe { core::arch::asm!("str {}", out(reg) tr); }
+        unsafe {
+            core::arch::asm!("str {}", out(reg) tr);
+        }
 
         // Host GDTR/IDTR base - read using inline asm
         // sgdt/sidt store a 10-byte descriptor: 2 bytes limit + 8 bytes base
@@ -181,14 +205,22 @@ impl Vmcs {
             core::arch::asm!("sgdt [{}]", in(reg) gdt_desc.as_mut_ptr());
             core::arch::asm!("sidt [{}]", in(reg) idt_desc.as_mut_ptr());
         }
-        let gdt_base = u64::from(gdt_desc[2]) | (u64::from(gdt_desc[3]) << 8)
-            | (u64::from(gdt_desc[4]) << 16) | (u64::from(gdt_desc[5]) << 24)
-            | (u64::from(gdt_desc[6]) << 32) | (u64::from(gdt_desc[7]) << 40)
-            | (u64::from(gdt_desc[8]) << 48) | (u64::from(gdt_desc[9]) << 56);
-        let idt_base = u64::from(idt_desc[2]) | (u64::from(idt_desc[3]) << 8)
-            | (u64::from(idt_desc[4]) << 16) | (u64::from(idt_desc[5]) << 24)
-            | (u64::from(idt_desc[6]) << 32) | (u64::from(idt_desc[7]) << 40)
-            | (u64::from(idt_desc[8]) << 48) | (u64::from(idt_desc[9]) << 56);
+        let gdt_base = u64::from(gdt_desc[2])
+            | (u64::from(gdt_desc[3]) << 8)
+            | (u64::from(gdt_desc[4]) << 16)
+            | (u64::from(gdt_desc[5]) << 24)
+            | (u64::from(gdt_desc[6]) << 32)
+            | (u64::from(gdt_desc[7]) << 40)
+            | (u64::from(gdt_desc[8]) << 48)
+            | (u64::from(gdt_desc[9]) << 56);
+        let idt_base = u64::from(idt_desc[2])
+            | (u64::from(idt_desc[3]) << 8)
+            | (u64::from(idt_desc[4]) << 16)
+            | (u64::from(idt_desc[5]) << 24)
+            | (u64::from(idt_desc[6]) << 32)
+            | (u64::from(idt_desc[7]) << 40)
+            | (u64::from(idt_desc[8]) << 48)
+            | (u64::from(idt_desc[9]) << 56);
 
         // SAFETY: VMCS is loaded on the current CPU.
         unsafe {
@@ -276,10 +308,16 @@ impl Vmcs {
         unsafe {
             vmwrite(vmcs_field::PIN_BASED_VM_EXEC_CONTROL, pin_ctrls as u64);
             vmwrite(vmcs_field::CPU_BASED_VM_EXEC_CONTROL, primary_ctrls as u64);
-            vmwrite(vmcs_field::SECONDARY_VM_EXEC_CONTROL, secondary_ctrls as u64);
+            vmwrite(
+                vmcs_field::SECONDARY_VM_EXEC_CONTROL,
+                secondary_ctrls as u64,
+            );
             vmwrite(vmcs_field::EXIT_CONTROLS, exit_ctrls as u64);
             vmwrite(vmcs_field::ENTRY_CONTROLS, entry_ctrls as u64);
-            vmwrite(vmcs_field::EXCEPTION_BITMAP, (1u64 << 1) | (1u64 << 3) | (1u64 << 14));
+            vmwrite(
+                vmcs_field::EXCEPTION_BITMAP,
+                (1u64 << 1) | (1u64 << 3) | (1u64 << 14),
+            );
             vmwrite(vmcs_field::PAGE_FAULT_ERROR_CODE_MASK, 0);
             vmwrite(vmcs_field::PAGE_FAULT_ERROR_CODE_MATCH, 0);
             vmwrite(vmcs_field::CR0_GUEST_HOST_MASK, 0);
@@ -318,11 +356,36 @@ impl Vmcs {
 
             // Guest DS/ES/SS/FS/GS: data segments
             for (sel, limit_f, ar_f, base_f) in [
-                (vmcs_field::GUEST_DS_SELECTOR, vmcs_field::GUEST_DS_LIMIT, vmcs_field::GUEST_DS_AR_BYTES, vmcs_field::GUEST_DS_BASE),
-                (vmcs_field::GUEST_ES_SELECTOR, vmcs_field::GUEST_ES_LIMIT, vmcs_field::GUEST_ES_AR_BYTES, vmcs_field::GUEST_ES_BASE),
-                (vmcs_field::GUEST_SS_SELECTOR, vmcs_field::GUEST_SS_LIMIT, vmcs_field::GUEST_SS_AR_BYTES, vmcs_field::GUEST_SS_BASE),
-                (vmcs_field::GUEST_FS_SELECTOR, vmcs_field::GUEST_FS_LIMIT, vmcs_field::GUEST_FS_AR_BYTES, vmcs_field::GUEST_FS_BASE),
-                (vmcs_field::GUEST_GS_SELECTOR, vmcs_field::GUEST_GS_LIMIT, vmcs_field::GUEST_GS_AR_BYTES, vmcs_field::GUEST_GS_BASE),
+                (
+                    vmcs_field::GUEST_DS_SELECTOR,
+                    vmcs_field::GUEST_DS_LIMIT,
+                    vmcs_field::GUEST_DS_AR_BYTES,
+                    vmcs_field::GUEST_DS_BASE,
+                ),
+                (
+                    vmcs_field::GUEST_ES_SELECTOR,
+                    vmcs_field::GUEST_ES_LIMIT,
+                    vmcs_field::GUEST_ES_AR_BYTES,
+                    vmcs_field::GUEST_ES_BASE,
+                ),
+                (
+                    vmcs_field::GUEST_SS_SELECTOR,
+                    vmcs_field::GUEST_SS_LIMIT,
+                    vmcs_field::GUEST_SS_AR_BYTES,
+                    vmcs_field::GUEST_SS_BASE,
+                ),
+                (
+                    vmcs_field::GUEST_FS_SELECTOR,
+                    vmcs_field::GUEST_FS_LIMIT,
+                    vmcs_field::GUEST_FS_AR_BYTES,
+                    vmcs_field::GUEST_FS_BASE,
+                ),
+                (
+                    vmcs_field::GUEST_GS_SELECTOR,
+                    vmcs_field::GUEST_GS_LIMIT,
+                    vmcs_field::GUEST_GS_AR_BYTES,
+                    vmcs_field::GUEST_GS_BASE,
+                ),
             ] {
                 vmwrite(sel, 0x10);
                 vmwrite(limit_f, 0xFFFFFFFF);

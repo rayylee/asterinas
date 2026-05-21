@@ -178,6 +178,21 @@ unsafe extern "sysv64" fn trap_handler(f: &mut TrapFrame) {
             }
             disable_local_if(was_irq_enabled);
         }
+        Some(CpuException::GeneralProtectionFault(_)) => {
+            enable_local_if(was_irq_enabled);
+            // Check if there's a recovery point in the exception table.
+            // This allows kernel code to safely probe MSRs that may #GP.
+            if let Some(addr) = ExTable::find_recovery_inst_addr(f.rip) {
+                f.rip = addr;
+                f.rax = 1; // Indicate error to the caller
+            } else {
+                panic!(
+                    "Cannot handle kernel CPU exception: {:#x?}; trapframe: {:#x?}",
+                    cpu_exception.as_ref().unwrap(),
+                    f
+                );
+            }
+        }
         Some(exception) => {
             enable_local_if(was_irq_enabled);
             panic!(

@@ -4,10 +4,7 @@
 //!
 //! Provides SVM-specific exit decoding using shared `GuestExitReason`.
 
-use crate::arch::guest::{
-    CpuidAccess, EptViolationInfo, GuestExitReason, IoPortAccess,
-    MsrAccess,
-};
+use crate::arch::guest::{CpuidAccess, EptViolationInfo, GuestExitReason, IoPortAccess, MsrAccess};
 
 /// SVM exit code values (from AMD APM Vol 2).
 #[allow(dead_code)]
@@ -72,28 +69,16 @@ pub(crate) unsafe fn decode_exit(
 
         svm_exit_code::SHUTDOWN => GuestExitReason::Shutdown,
 
-        svm_exit_code::VMMCALL => {
-            GuestExitReason::InternalError
-        }
+        svm_exit_code::VMMCALL => GuestExitReason::InternalError,
 
         svm_exit_code::IOIO => {
-            // SVM IOIO exit info: EXITINFO1 encodes port access info
-            //   EXITINFO1[15:0] = port number
-            //   EXITINFO1[27:16] = not used
-            //   EXITINFO1[31:28] = access type (0=INVLPG, ...)
-            //   EXITINFO1[39:32] = REP count (or 0 if no REP)
-            //   EXITINFO1[55:40] = reserved
-            //   EXITINFO1[63:56] = address size (0=16bit, 1=32bit, 2=64bit)
-            // These details are from AMD APM Vol 2.
-            let port = (exit_info1 & 0xFFFF) as u16;
-            let direction = (exit_info1 >> 4) & 0x1; // 0=OUT, 1=IN
-            let size_bits = (exit_info1 >> 12) & 0x3; // 1=I/O size
-            let size = match size_bits {
-                0 => 1,
-                1 => 2,
-                _ => 4,
-            };
-            let is_write = direction == 0; // OUT = write from guest perspective
+            // AMD SVM IOIO EXITINFO1 encoding (AMD APM Vol 2, Table 15-20):
+            //   Bit 0:     Type (0=OUT, 1=IN)
+            //   Bits 6:4:  Access size (0=1b, 1=2b, 2=4b, 3=8b)
+            //   Bits 31:16: Port number
+            let port = (exit_info1 >> 16) as u16;
+            let is_write = (exit_info1 & 1) == 0;
+            let size = 1 << ((exit_info1 >> 4) & 0x7);
             let value = if is_write { guest_rax as u32 } else { 0 };
 
             GuestExitReason::Io(IoPortAccess {

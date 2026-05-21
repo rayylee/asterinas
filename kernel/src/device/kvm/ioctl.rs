@@ -5,7 +5,7 @@
 //! Defines the ioctl command types for the KVM device, VM, and vCPU file
 //! descriptors. All KVM ioctls use the magic byte `0xAE`.
 
-use crate::util::ioctl::{ioc, InData, NoData, OutData, PassByVal};
+use crate::util::ioctl::{InData, NoData, OutData, PassByVal, ioc};
 
 // /dev/kvm ioctls
 pub type GetApiVersion = ioc!(KVM_GET_API_VERSION, 0xAE00, NoData);
@@ -142,9 +142,13 @@ pub const KVM_EXIT_FAIL_ENTRY: u32 = 9;
 pub const KVM_EXIT_INTR: u32 = 10;
 pub const KVM_EXIT_INTERNAL_ERROR: u32 = 17;
 
-/// I/O direction constants.
-pub const KVM_EXIT_IO_IN: u8 = 0;
-pub const KVM_EXIT_IO_OUT: u8 = 1;
+/// I/O direction constants (Linux KVM ABI).
+///
+/// Must match Linux `include/uapi/linux/kvm.h`:
+///   KVM_EXIT_IO_OUT = 0
+///   KVM_EXIT_IO_IN  = 1
+pub const KVM_EXIT_IO_OUT: u8 = 0;
+pub const KVM_EXIT_IO_IN: u8 = 1;
 
 /// KVM capability constants (matching Linux `KVM_CAP_*`).
 pub const KVM_CAP_IRQCHIP: i32 = 0;

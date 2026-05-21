@@ -22,6 +22,7 @@ pub fn sys_mmap(
     offset: u64,
     ctx: &Context,
 ) -> Result<SyscallReturn> {
+    println!("KVM: sys_mmap addr={:#x} len={:#x} fd={}", addr, len, fd);
     let perms = VmPerms::from_user_bits_truncate(perms as u32);
     let option = MMapOptions::try_from(flags as u32)?;
     let res = do_sys_mmap(
