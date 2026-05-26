@@ -316,6 +316,7 @@ impl BlockDevice for MockPageCacheBackend {
         BlockDeviceMeta {
             max_nr_segments_per_bio: 1,
             nr_sectors: self.num_pages * (PAGE_SIZE / SECTOR_SIZE),
+            read_only: false,
         }
     }
 

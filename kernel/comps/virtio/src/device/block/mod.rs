@@ -120,6 +120,7 @@ struct VirtioBlockTopology {
 #[derive(Clone, Copy, Debug)]
 struct VirtioBlockFeature {
     support_flush: bool,
+    support_ro: bool,
 }
 
 impl VirtioBlockConfig {
@@ -200,7 +201,12 @@ impl ConfigManager<VirtioBlockConfig> {
 
 impl VirtioBlockFeature {
     pub(self) fn new(transport: &dyn VirtioTransport) -> Self {
-        let support_flush = (transport.read_device_features() & BlockFeatures::FLUSH.bits()) != 0;
-        VirtioBlockFeature { support_flush }
+        let device_features = transport.read_device_features();
+        let support_flush = (device_features & BlockFeatures::FLUSH.bits()) != 0;
+        let support_ro = (device_features & BlockFeatures::RO.bits()) != 0;
+        VirtioBlockFeature {
+            support_flush,
+            support_ro,
+        }
     }
 }

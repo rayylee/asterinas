@@ -199,6 +199,7 @@ mod test {
             BlockDeviceMeta {
                 max_nr_segments_per_bio: usize::MAX,
                 nr_sectors: self.blocks.size() / SECTOR_SIZE,
+                read_only: false,
             }
         }
 

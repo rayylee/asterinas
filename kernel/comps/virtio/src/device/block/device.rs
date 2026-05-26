@@ -116,6 +116,19 @@ impl BlockDevice {
     pub fn handle_requests(&self) {
         let request = self.queue.dequeue();
         info!("Handle Request: {:?}", request);
+
+        if self.device.features.support_ro {
+            match request.type_() {
+                BioType::Write | BioType::Flush => {
+                    request.into_bios().for_each(|bio| {
+                        bio.complete(BioStatus::IoError);
+                    });
+                    return;
+                }
+                _ => {}
+            }
+        }
+
         match request.type_() {
             BioType::Read => self.device.read(request),
             BioType::Write => self.device.write(request),
@@ -140,6 +153,7 @@ impl aster_block::BlockDevice for BlockDevice {
         BlockDeviceMeta {
             max_nr_segments_per_bio: self.queue.max_nr_segments_per_bio(),
             nr_sectors: self.device.config_manager.capacity_sectors(),
+            read_only: self.device.features.support_ro,
         }
     }
 

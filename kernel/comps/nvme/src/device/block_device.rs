@@ -78,6 +78,7 @@ impl aster_block::BlockDevice for NvmeBlockDevice {
         BlockDeviceMeta {
             max_nr_segments_per_bio: self.queue.max_nr_segments_per_bio(),
             nr_sectors: sectors as usize,
+            read_only: false,
         }
     }
 
