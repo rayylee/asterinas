@@ -2,7 +2,6 @@
 
 use alloc::{
     boxed::Box,
-    collections::BTreeMap,
     format,
     string::String,
     sync::{Arc, Weak},
@@ -205,7 +204,7 @@ struct DeviceInner {
     block_requests: Arc<DmaStream>,
     block_responses: Arc<DmaStream>,
     id_allocator: SyncIdAlloc,
-    submitted_requests: SpinLock<BTreeMap<u16, SubmittedRequest>>,
+    submitted_requests: SpinLock<Vec<SubmittedRequest>>,
 }
 
 impl DeviceInner {
@@ -255,7 +254,11 @@ impl DeviceInner {
             block_requests,
             block_responses,
             id_allocator: SyncIdAlloc::with_capacity(Self::QUEUE_SIZE as usize),
-            submitted_requests: SpinLock::new(BTreeMap::new()),
+            submitted_requests: SpinLock::new(
+                (0..Self::QUEUE_SIZE)
+                    .map(|_| SubmittedRequest::new())
+                    .collect(),
+            ),
         });
 
         let cloned_device = device.clone();
@@ -286,16 +289,16 @@ impl DeviceInner {
         // so there is no need to call `disable_irq`.
         loop {
             // Pops the complete request
-            let complete_request = {
+            let (id, bio_request) = {
                 let mut queue = self.queue.lock();
                 let Ok((token, _)) = queue.pop_used_with_min_bytes(RESP_SIZE) else {
                     return;
                 };
-                self.submitted_requests.lock().remove(&token).unwrap()
+                self.submitted_requests.lock()[token as usize].take()
             };
 
             // Handles the response
-            let id = complete_request.id as usize;
+            let id = id as usize;
             let resp_slice =
                 Slice::new(&self.block_responses, id * RESP_SIZE..(id + 1) * RESP_SIZE);
             resp_slice.sync_from_device().unwrap();
@@ -305,7 +308,7 @@ impl DeviceInner {
                 Ok(RespStatus::Ok) => {}
                 _ => {
                     // Completes the bio request with an error
-                    complete_request.bio_request.into_bios().for_each(|bio| {
+                    bio_request.into_bios().for_each(|bio| {
                         bio.complete(BioStatus::IoError);
                     });
                     continue;
@@ -313,9 +316,8 @@ impl DeviceInner {
             };
 
             // Synchronize DMA mapping if read from the device
-            if let BioType::Read = complete_request.bio_request.type_() {
-                complete_request
-                    .bio_request
+            if let BioType::Read = bio_request.type_() {
+                bio_request
                     .bios()
                     .flat_map(|bio| {
                         bio.segments()
@@ -326,7 +328,7 @@ impl DeviceInner {
             }
 
             // Completes the bio request
-            complete_request.bio_request.into_bios().for_each(|bio| {
+            bio_request.into_bios().for_each(|bio| {
                 bio.complete(BioStatus::Complete);
             });
         }
@@ -395,11 +397,8 @@ impl DeviceInner {
             }
 
             // Records the submitted request
-            let submitted_request = SubmittedRequest::new(id as u16, bio_request);
-            self.submitted_requests
-                .disable_irq()
-                .lock()
-                .insert(token, submitted_request);
+            self.submitted_requests.disable_irq().lock()[token as usize]
+                .fill(id as u16, bio_request);
             return;
         }
     }
@@ -462,11 +461,8 @@ impl DeviceInner {
             }
 
             // Records the submitted request
-            let submitted_request = SubmittedRequest::new(id as u16, bio_request);
-            self.submitted_requests
-                .disable_irq()
-                .lock()
-                .insert(token, submitted_request);
+            self.submitted_requests.disable_irq().lock()[token as usize]
+                .fill(id as u16, bio_request);
             return;
         }
     }
@@ -517,11 +513,8 @@ impl DeviceInner {
             }
 
             // Records the submitted request
-            let submitted_request = SubmittedRequest::new(id as u16, bio_request);
-            self.submitted_requests
-                .disable_irq()
-                .lock()
-                .insert(token, submitted_request);
+            self.submitted_requests.disable_irq().lock()[token as usize]
+                .fill(id as u16, bio_request);
             return;
         }
     }
@@ -531,12 +524,27 @@ impl DeviceInner {
 #[derive(Debug)]
 struct SubmittedRequest {
     id: u16,
-    bio_request: BioRequest,
+    bio_request: Option<BioRequest>,
 }
 
 impl SubmittedRequest {
-    pub fn new(id: u16, bio_request: BioRequest) -> Self {
-        Self { id, bio_request }
+    fn new() -> Self {
+        Self {
+            id: 0,
+            bio_request: None,
+        }
+    }
+
+    fn fill(&mut self, id: u16, bio_request: BioRequest) {
+        debug_assert!(self.bio_request.is_none());
+        self.id = id;
+        self.bio_request = Some(bio_request);
+    }
+
+    fn take(&mut self) -> (u16, BioRequest) {
+        debug_assert!(self.bio_request.is_some());
+        let bio_request = self.bio_request.take().unwrap();
+        (self.id, bio_request)
     }
 }
 
