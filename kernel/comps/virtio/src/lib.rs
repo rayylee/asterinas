@@ -65,7 +65,7 @@ fn virtio_component_init() -> Result<(), ComponentInitError> {
             .write_device_status(DeviceStatus::ACKNOWLEDGE | DeviceStatus::DRIVER)
             .unwrap();
         // negotiate features
-        negotiate_features(&mut transport);
+        let negotiated_features = negotiate_features(&mut transport);
 
         if !transport.is_legacy_version() {
             // change to features ok status
@@ -76,7 +76,9 @@ fn virtio_component_init() -> Result<(), ComponentInitError> {
 
         let device_type = transport.device_type();
         let res = match transport.device_type() {
-            VirtioDeviceType::Block => BlockDevice::init(transport),
+            VirtioDeviceType::Block => {
+                BlockDevice::init(transport, negotiated_features)
+            }
             VirtioDeviceType::Console => ConsoleDevice::init(transport),
             VirtioDeviceType::Entropy => EntropyDevice::init(transport),
             VirtioDeviceType::Input => InputDevice::init(transport),
@@ -108,7 +110,7 @@ fn pop_device_transport() -> Option<Box<dyn VirtioTransport>> {
     None
 }
 
-fn negotiate_features(transport: &mut Box<dyn VirtioTransport>) {
+fn negotiate_features(transport: &mut Box<dyn VirtioTransport>) -> u64 {
     let features = transport.read_device_features();
     let mask = ((1u64 << 24) - 1) | (((1u64 << 24) - 1) << 50);
     let device_specified_features = features & mask;
@@ -125,9 +127,11 @@ fn negotiate_features(transport: &mut Box<dyn VirtioTransport>) {
     };
     let mut support_feature = Feature::from_bits_truncate(features);
     support_feature.remove(Feature::RING_EVENT_IDX);
+    let negotiated = features & (support_feature.bits | device_support_features);
     transport
-        .write_driver_features(features & (support_feature.bits | device_support_features))
+        .write_driver_features(negotiated)
         .unwrap();
+    negotiated
 }
 
 bitflags! {

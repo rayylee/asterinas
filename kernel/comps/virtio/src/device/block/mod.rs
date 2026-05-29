@@ -33,6 +33,21 @@ bitflags! {
     }
 }
 
+impl BlockFeatures {
+    fn supported_features() -> Self {
+        Self::FLUSH | Self::BLK_SIZE
+    }
+
+    fn config_features() -> Self {
+        Self::SIZE_MAX
+            | Self::SEG_MAX
+            | Self::GEOMETRY
+            | Self::RO
+            | Self::TOPOLOGY
+            | Self::CONFIG_WCE
+    }
+}
+
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, TryFromInt)]
 enum ReqType {
@@ -116,10 +131,21 @@ struct VirtioBlockTopology {
     opt_io_size: u32,
 }
 
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Debug)]
 struct VirtioBlockFeature {
-    support_flush: bool,
+    features: BlockFeatures,
+}
+
+impl VirtioBlockFeature {
+    fn new(negotiated_features: u64) -> Self {
+        Self {
+            features: BlockFeatures::from_bits_truncate(negotiated_features),
+        }
+    }
+
+    fn support_flush(&self) -> bool {
+        self.features.contains(BlockFeatures::FLUSH)
+    }
 }
 
 impl VirtioBlockConfig {
@@ -198,9 +224,4 @@ impl ConfigManager<VirtioBlockConfig> {
     }
 }
 
-impl VirtioBlockFeature {
-    pub(self) fn new(transport: &dyn VirtioTransport) -> Self {
-        let support_flush = (transport.read_device_features() & BlockFeatures::FLUSH.bits()) != 0;
-        VirtioBlockFeature { support_flush }
-    }
-}
+

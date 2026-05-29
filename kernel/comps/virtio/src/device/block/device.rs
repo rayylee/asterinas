@@ -82,8 +82,11 @@ impl BlockDevice {
     }
 
     /// Creates a new VirtIO-Block driver and registers it.
-    pub(crate) fn init(transport: Box<dyn VirtioTransport>) -> Result<(), VirtioDeviceError> {
-        let device = DeviceInner::init(transport)?;
+    pub(crate) fn init(
+        transport: Box<dyn VirtioTransport>,
+        negotiated_features: u64,
+    ) -> Result<(), VirtioDeviceError> {
+        let device = DeviceInner::init(transport, negotiated_features)?;
 
         let index = NR_BLOCK_DEVICE.fetch_add(1, Ordering::Relaxed);
         let id = DeviceId::new(
@@ -123,11 +126,13 @@ impl BlockDevice {
         }
     }
 
-    /// Negotiate features for the device specified bits 0~23
+    /// Negotiate features with the device.
     pub(crate) fn negotiate_features(features: u64) -> u64 {
-        let mut support_features = BlockFeatures::from_bits_truncate(features);
-        support_features.remove(BlockFeatures::MQ);
-        support_features.bits
+        let device_features = BlockFeatures::from_bits_truncate(features);
+        let can_accept =
+            BlockFeatures::supported_features() | BlockFeatures::config_features();
+        let negotiated = device_features & can_accept;
+        negotiated.bits
     }
 }
 
@@ -212,7 +217,10 @@ impl DeviceInner {
     const QUEUE_SIZE: u16 = 64;
 
     /// Creates and inits the device.
-    fn init(mut transport: Box<dyn VirtioTransport>) -> Result<Arc<Self>, VirtioDeviceError> {
+    fn init(
+        mut transport: Box<dyn VirtioTransport>,
+        negotiated_features: u64,
+    ) -> Result<Arc<Self>, VirtioDeviceError> {
         let config_manager = VirtioBlockConfig::new_manager(transport.as_ref());
 
         let config = config_manager.read_config();
@@ -234,7 +242,7 @@ impl DeviceInner {
             );
         }
 
-        let features = VirtioBlockFeature::new(transport.as_ref());
+        let features = VirtioBlockFeature::new(negotiated_features);
 
         let queue = VirtQueue::new(0, Self::QUEUE_SIZE, transport.as_mut())?;
 
@@ -303,8 +311,13 @@ impl DeviceInner {
             self.id_allocator.dealloc(id);
             match RespStatus::try_from(resp.status) {
                 Ok(RespStatus::Ok) => {}
+                Ok(RespStatus::Unsupported) => {
+                    complete_request.bio_request.into_bios().for_each(|bio| {
+                        bio.complete(BioStatus::NotSupported);
+                    });
+                    continue;
+                }
                 _ => {
-                    // Completes the bio request with an error
                     complete_request.bio_request.into_bios().for_each(|bio| {
                         bio.complete(BioStatus::IoError);
                     });
@@ -474,7 +487,7 @@ impl DeviceInner {
     /// Flushes any cached data from the guest to the persistent storage on the host.
     /// This will be ignored if the device doesn't support the `VIRTIO_BLK_F_FLUSH` feature.
     fn flush(&self, bio_request: BioRequest) {
-        if !self.features.support_flush {
+        if !self.features.support_flush() {
             bio_request.into_bios().for_each(|bio| {
                 bio.complete(BioStatus::Complete);
             });
