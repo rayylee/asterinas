@@ -4,7 +4,7 @@ pub mod device;
 
 use core::mem::offset_of;
 
-use aster_block::SECTOR_SIZE;
+use aster_block::{SECTOR_SIZE, bio::BioStatus};
 use aster_util::safe_ptr::SafePtr;
 use bitflags::bitflags;
 use int_to_c_enum::TryFromInt;
@@ -148,6 +148,14 @@ impl VirtioBlockFeature {
     }
 }
 
+fn resp_status_to_bio_status(status: RespStatus) -> BioStatus {
+    match status {
+        RespStatus::Ok => BioStatus::Complete,
+        RespStatus::Unsupported => BioStatus::NotSupported,
+        _ => BioStatus::IoError,
+    }
+}
+
 impl VirtioBlockConfig {
     pub(self) fn new_manager(transport: &dyn VirtioTransport) -> ConfigManager<Self> {
         let safe_ptr = transport
@@ -224,4 +232,52 @@ impl ConfigManager<VirtioBlockConfig> {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
 
+    #[test]
+    fn negotiate_features_keeps_only_supported_and_config_features() {
+        let features = BlockFeatures::MQ
+            | BlockFeatures::FLUSH
+            | BlockFeatures::BLK_SIZE
+            | BlockFeatures::SIZE_MAX
+            | BlockFeatures::SEG_MAX
+            | BlockFeatures::GEOMETRY
+            | BlockFeatures::RO
+            | BlockFeatures::TOPOLOGY
+            | BlockFeatures::CONFIG_WCE
+            | BlockFeatures::WRITE_ZEROES;
+
+        let negotiated = BlockFeatures::from_bits_truncate(
+            device::BlockDevice::negotiate_features(features.bits()),
+        );
+
+        assert!(negotiated.contains(BlockFeatures::FLUSH));
+        assert!(negotiated.contains(BlockFeatures::BLK_SIZE));
+        assert!(negotiated.contains(BlockFeatures::SIZE_MAX));
+        assert!(negotiated.contains(BlockFeatures::SEG_MAX));
+        assert!(negotiated.contains(BlockFeatures::GEOMETRY));
+        assert!(negotiated.contains(BlockFeatures::RO));
+        assert!(negotiated.contains(BlockFeatures::TOPOLOGY));
+        assert!(negotiated.contains(BlockFeatures::CONFIG_WCE));
+        assert!(!negotiated.contains(BlockFeatures::MQ));
+        assert!(!negotiated.contains(BlockFeatures::WRITE_ZEROES));
+    }
+
+    #[test]
+    fn unsupported_resp_status_maps_to_not_supported_bio_status() {
+        assert_eq!(
+            resp_status_to_bio_status(RespStatus::Unsupported),
+            BioStatus::NotSupported
+        );
+        assert_eq!(
+            resp_status_to_bio_status(RespStatus::Ok),
+            BioStatus::Complete
+        );
+        assert_eq!(
+            resp_status_to_bio_status(RespStatus::IoErr),
+            BioStatus::IoError
+        );
+    }
+}

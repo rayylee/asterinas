@@ -129,8 +129,7 @@ impl BlockDevice {
     /// Negotiate features with the device.
     pub(crate) fn negotiate_features(features: u64) -> u64 {
         let device_features = BlockFeatures::from_bits_truncate(features);
-        let can_accept =
-            BlockFeatures::supported_features() | BlockFeatures::config_features();
+        let can_accept = BlockFeatures::supported_features() | BlockFeatures::config_features();
         let negotiated = device_features & can_accept;
         negotiated.bits
     }
@@ -309,21 +308,15 @@ impl DeviceInner {
             resp_slice.sync_from_device().unwrap();
             let resp: BlockResp = resp_slice.read_val(0).unwrap();
             self.id_allocator.dealloc(id);
-            match RespStatus::try_from(resp.status) {
-                Ok(RespStatus::Ok) => {}
-                Ok(RespStatus::Unsupported) => {
-                    complete_request.bio_request.into_bios().for_each(|bio| {
-                        bio.complete(BioStatus::NotSupported);
-                    });
-                    continue;
-                }
-                _ => {
-                    complete_request.bio_request.into_bios().for_each(|bio| {
-                        bio.complete(BioStatus::IoError);
-                    });
-                    continue;
-                }
-            };
+            let bio_status = RespStatus::try_from(resp.status)
+                .map(super::resp_status_to_bio_status)
+                .unwrap_or(BioStatus::IoError);
+            if bio_status != BioStatus::Complete {
+                complete_request.bio_request.into_bios().for_each(|bio| {
+                    bio.complete(bio_status);
+                });
+                continue;
+            }
 
             // Synchronize DMA mapping if read from the device
             if let BioType::Read = complete_request.bio_request.type_() {
