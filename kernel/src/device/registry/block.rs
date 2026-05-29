@@ -162,7 +162,7 @@ impl PerOpenFileOps for OpenBlockFile {
                 Ok(0)
             }
             _ => return_errno_with_message!(
-                Errno::ENOTTY,
+                Errno::EOPNOTSUPP,
                 "the ioctl command is not supported by block devices"
             ),
         })
