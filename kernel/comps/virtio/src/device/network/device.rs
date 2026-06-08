@@ -8,7 +8,10 @@ use aster_network::{AnyNetworkDevice, EthernetAddr, NetError, RxBuffer, TxBuffer
 use aster_util::slot_vec::SlotVec;
 use ostd::{arch::trap::TrapFrame, debug, sync::SpinLock, warn};
 
-use super::{config::VirtioNetConfig, header::VirtioNetHdr};
+use super::{
+    config::VirtioNetConfig,
+    header::{VirtioNetHdr, VirtioNetHdrLegacy},
+};
 use crate::{
     device::{
         VirtioDeviceError,
@@ -31,6 +34,7 @@ pub struct NetworkDevice {
     // Since the virtio net header remains consistent for each sending packet,
     // we store it to avoid recreating the header repeatedly.
     header: VirtioNetHdr,
+    header_len: usize,
     tx_buffers: Vec<Option<TxBuffer>>,
     rx_buffers: SlotVec<RxBuffer>,
     new_rx_buffer: Option<RxBuffer>,
@@ -79,6 +83,13 @@ impl NetworkDevice {
             transport.read_device_features(),
         ));
         debug!("features = {:?}", features);
+        let header_len = if transport.is_legacy_version()
+            && !features.contains(NetworkFeatures::VIRTIO_NET_F_MRG_RXBUF)
+        {
+            size_of::<VirtioNetHdrLegacy>()
+        } else {
+            size_of::<VirtioNetHdr>()
+        };
 
         let caps = init_caps(&features, &config);
 
@@ -92,8 +103,8 @@ impl NetworkDevice {
         let mut rx_buffers = SlotVec::new();
         for i in 0..QUEUE_SIZE {
             let rx_pool = RX_BUFFER_POOL.get().unwrap();
-            let rx_buffer = RxBuffer::new(size_of::<VirtioNetHdr>(), rx_pool)
-                .map_err(VirtioDeviceError::ResourceAlloc)?;
+            let rx_buffer =
+                RxBuffer::new(header_len, rx_pool).map_err(VirtioDeviceError::ResourceAlloc)?;
             let token = recv_queue.add_output_bufs(&[&rx_buffer]).unwrap();
             assert_eq!(i, token);
             assert_eq!(rx_buffers.put(rx_buffer) as u16, i);
@@ -111,6 +122,7 @@ impl NetworkDevice {
             send_queue,
             recv_queue,
             header: VirtioNetHdr::default(),
+            header_len,
             tx_buffers,
             rx_buffers,
             new_rx_buffer: None,
@@ -172,20 +184,20 @@ impl NetworkDevice {
             // FIXME: Ideally, we can reuse the returned buffer without creating new buffer.
             // But this requires locking device to be compatible with smoltcp interface.
             let rx_pool = RX_BUFFER_POOL.get().unwrap();
-            let new_rx_buffer = RxBuffer::new(size_of::<VirtioNetHdr>(), rx_pool)
-                .map_err(|_| NetError::NoMemory)?;
+            let new_rx_buffer =
+                RxBuffer::new(self.header_len, rx_pool).map_err(|_| NetError::NoMemory)?;
 
             self.new_rx_buffer = Some(new_rx_buffer);
         }
 
         let (token, len) = self
             .recv_queue
-            .pop_used_with_min_bytes(size_of::<VirtioNetHdr>())
+            .pop_used_with_min_bytes(self.header_len)
             .map_err(|_| NetError::NotReady)?;
         debug!("receive packet: token = {}, len = {}", token, len);
 
         let mut rx_buffer = self.rx_buffers.remove(token as usize).unwrap();
-        rx_buffer.set_payload_len(len as usize - size_of::<VirtioNetHdr>());
+        rx_buffer.set_payload_len(len as usize - self.header_len);
 
         let new_rx_buffer = self.new_rx_buffer.take().unwrap();
         self.add_rx_buffer(new_rx_buffer).unwrap();
@@ -200,8 +212,12 @@ impl NetworkDevice {
         }
 
         let tx_pool = TX_BUFFER_POOL.get().unwrap();
-        let tx_buffer =
-            TxBuffer::new(&self.header, packet, tx_pool).map_err(|_| NetError::NoMemory)?;
+        let tx_buffer = if self.header_len == size_of::<VirtioNetHdrLegacy>() {
+            TxBuffer::new(&VirtioNetHdrLegacy::default(), packet, tx_pool)
+        } else {
+            TxBuffer::new(&self.header, packet, tx_pool)
+        }
+        .map_err(|_| NetError::NoMemory)?;
 
         let token = self.send_queue.add_input_bufs(&[&tx_buffer]).unwrap();
 

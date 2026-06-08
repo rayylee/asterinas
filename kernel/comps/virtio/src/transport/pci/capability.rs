@@ -3,7 +3,7 @@
 use aster_pci::{
     capability::vendor::CapabilityVndrData, cfg_space::BarAccess, common_device::BarManager,
 };
-use ostd::{io::IoMem, warn};
+use ostd::{bus::BusProbeError, io::IoMem, warn};
 
 #[expect(clippy::enum_variant_names)]
 #[repr(u8)]
@@ -46,7 +46,17 @@ impl VirtioPciCapabilityData {
         self.option
     }
 
-    pub(super) fn new(bar_manager: &mut BarManager, vendor_cap: CapabilityVndrData) -> Self {
+    pub(super) fn is_modern_cap(vendor_cap: &CapabilityVndrData) -> bool {
+        let Ok(cfg_type) = vendor_cap.read8(3) else {
+            return false;
+        };
+        matches!(cfg_type, 1..=5) && vendor_cap.read32(8).is_ok() && vendor_cap.read32(12).is_ok()
+    }
+
+    pub(super) fn new(
+        bar_manager: &mut BarManager,
+        vendor_cap: CapabilityVndrData,
+    ) -> Result<Self, BusProbeError> {
         let cfg_type = vendor_cap.read8(3).unwrap();
         let cfg_type = match cfg_type {
             1 => VirtioPciCpabilityType::CommonCfg,
@@ -54,7 +64,10 @@ impl VirtioPciCapabilityData {
             3 => VirtioPciCpabilityType::IsrCfg,
             4 => VirtioPciCpabilityType::DeviceCfg,
             5 => VirtioPciCpabilityType::PciCfg,
-            _ => panic!("Unsupported virtio capability type: {:?}", cfg_type),
+            _ => {
+                warn!("Unsupported virtio capability type: {:?}", cfg_type);
+                return Err(BusProbeError::ConfigurationSpaceError);
+            }
         };
 
         let offset = vendor_cap.read32(8).unwrap();
@@ -67,11 +80,11 @@ impl VirtioPciCapabilityData {
             None
         };
 
-        let bar = vendor_cap.read8(4).unwrap();
-        let memory_bar = if let Some(bar) = bar_manager.bar_mut(bar) {
+        let bar_index = vendor_cap.read8(4).unwrap();
+        let memory_bar = if let Some(bar) = bar_manager.bar_mut(bar_index) {
             match bar.acquire() {
                 Ok(BarAccess::Memory(io_mem)) => Some(io_mem),
-                Ok(BarAccess::Io) => {
+                Ok(BarAccess::Io(_)) => {
                     warn!("I/O BAR is not supported");
                     None
                 }
@@ -84,12 +97,12 @@ impl VirtioPciCapabilityData {
             None
         };
 
-        Self {
+        Ok(Self {
             cfg_type,
             offset,
             length,
             option,
             memory_bar,
-        }
+        })
     }
 }

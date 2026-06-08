@@ -6,7 +6,7 @@ use aster_pci::{
     bus::{PciDevice, PciDriver},
     common_device::PciCommonDevice,
 };
-use ostd::{bus::BusProbeError, sync::SpinLock};
+use ostd::{bus::BusProbeError, sync::SpinLock, warn};
 
 use super::device::VirtioPciModernTransport;
 use crate::transport::{
@@ -46,8 +46,21 @@ impl PciDriver for VirtioPciDriver {
         let transport: Box<dyn VirtioTransport> = match device_id.device_id {
             0x1000..0x1040 if (device.device_id().revision_id == 0) => {
                 if has_vendor_cap {
-                    let modern = VirtioPciModernTransport::new(device)?;
-                    Box::new(modern)
+                    // Transitional device: try the modern transport first.
+                    // If it fails (e.g., vendor capabilities use I/O BARs),
+                    // fall back to the legacy transport.
+                    match VirtioPciModernTransport::new(device) {
+                        Ok(modern) => Box::new(modern),
+                        Err((_, dev)) => {
+                            warn!(
+                                "Modern virtio transport init failed, \
+                                 falling back to legacy for device {:x}",
+                                device_id.device_id
+                            );
+                            let legacy = VirtioPciLegacyTransport::new(dev)?;
+                            Box::new(legacy)
+                        }
+                    }
                 } else {
                     let legacy = VirtioPciLegacyTransport::new(device)?;
                     Box::new(legacy)

@@ -69,7 +69,7 @@ impl CapabilityMsixData {
             .acquire()?
         {
             BarAccess::Memory(io_mem) => io_mem,
-            BarAccess::Io => return Err(Error::InvalidArgs),
+            BarAccess::Io(_) => return Err(Error::InvalidArgs),
         };
         let pba_offset = (raw_cap.pba_info & !(0b111u32)) as usize;
 
@@ -79,7 +79,7 @@ impl CapabilityMsixData {
             .acquire()?
         {
             BarAccess::Memory(io_mem) => io_mem,
-            BarAccess::Io => return Err(Error::InvalidArgs),
+            BarAccess::Io(_) => return Err(Error::InvalidArgs),
         };
         let table_offset = (raw_cap.table_info & !(0b111u32)) as usize;
 

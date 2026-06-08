@@ -12,7 +12,7 @@ use ostd::{
     info,
     io::IoMem,
     irq::IrqCallbackFunction,
-    mm::{HasDaddr, dma::DmaCoherent},
+    mm::{HasDaddr, HasSize, dma::DmaCoherent},
     warn,
 };
 
@@ -130,13 +130,19 @@ impl VirtioTransport for VirtioPciModernTransport {
     fn device_config_mem(&self) -> Option<IoMem> {
         let offset = self.device_cfg.offset() as usize;
         let length = self.device_cfg.length() as usize;
-        let io_mem = self
-            .device_cfg
-            .memory_bar()
-            .unwrap()
-            .slice(offset..offset + length);
+        let mem = self.device_cfg.memory_bar()?;
+        let end = offset.checked_add(length)?;
+        if offset >= end || end > mem.size() {
+            warn!(
+                "Invalid virtio device config range: offset={:#x}, length={:#x}, bar_size={:#x}",
+                offset,
+                length,
+                mem.size()
+            );
+            return None;
+        }
 
-        Some(io_mem)
+        Some(mem.slice(offset..end))
     }
 
     fn device_config_bar(&self) -> Option<(BarAccess, usize)> {
@@ -268,52 +274,109 @@ impl VirtioPciModernTransport {
         mut common_device: PciCommonDevice,
     ) -> Result<Self, (BusProbeError, PciCommonDevice)> {
         let device_id = common_device.device_id().device_id;
-        let device_type_value = if device_id <= 0x1040 {
-            device_id - 0x1000
+        // Transitional devices use legacy PCI IDs (0x1000–0x103f) with a non-linear
+        // mapping to virtio device types. Modern-only devices use 0x1040 + device_type.
+        let device_type = if device_id < 0x1040 {
+            match device_id {
+                0x1000 => VirtioDeviceType::Network,
+                0x1001 => VirtioDeviceType::Block,
+                0x1002 => VirtioDeviceType::TraditionalMemoryBalloon,
+                0x1003 => VirtioDeviceType::Console,
+                0x1004 => VirtioDeviceType::ScsiHost,
+                0x1005 => VirtioDeviceType::Entropy,
+                0x1009 => VirtioDeviceType::Transport9P,
+                _ => {
+                    warn!("Unrecognized virtio-pci device ID: {:x?}", device_id);
+                    return Err((BusProbeError::DeviceNotMatch, common_device));
+                }
+            }
         } else {
-            device_id - 0x1040
-        };
-
-        let device_type = match VirtioDeviceType::try_from(device_type_value as u8) {
-            Ok(device) => device,
-            Err(_) => {
-                warn!("Unrecognized virtio-pci device ID: {:x?}", device_id);
-                return Err((BusProbeError::DeviceNotMatch, common_device));
+            match VirtioDeviceType::try_from((device_id - 0x1040) as u8) {
+                Ok(device) => device,
+                Err(_) => {
+                    warn!("Unrecognized virtio-pci device ID: {:x?}", device_id);
+                    return Err((BusProbeError::DeviceNotMatch, common_device));
+                }
             }
         };
 
         info!("Found device: {:?}", device_type);
 
+        if !common_device
+            .iter_vndr_capability()
+            .all(|cap| VirtioPciCapabilityData::is_modern_cap(&cap))
+        {
+            warn!("Invalid virtio modern PCI capability");
+            return Err((BusProbeError::ConfigurationSpaceError, common_device));
+        }
+
         let mut notify = None;
         let mut common_cfg = None;
         let mut device_cfg = None;
-        let (vndr_caps, bar_manager) = common_device.iter_vndr_capability_with_bar_manager();
-        for vndr_cap in vndr_caps {
-            let data = VirtioPciCapabilityData::new(bar_manager, vndr_cap);
-            match data.typ() {
-                VirtioPciCpabilityType::CommonCfg => {
-                    common_cfg = Some(VirtioPciCommonCfg::new(&data));
+        let parse_result: Result<(), BusProbeError> = (|| {
+            let (vndr_caps, bar_manager) = common_device.iter_vndr_capability_with_bar_manager();
+            for vndr_cap in vndr_caps {
+                let data = VirtioPciCapabilityData::new(bar_manager, vndr_cap)?;
+                match data.typ() {
+                    VirtioPciCpabilityType::CommonCfg => {
+                        common_cfg = Some(VirtioPciCommonCfg::new(&data)?);
+                    }
+                    VirtioPciCpabilityType::NotifyCfg => {
+                        let Some(io_memory) = data.memory_bar().cloned() else {
+                            warn!("NotifyCfg capability does not use a memory BAR");
+                            return Err(BusProbeError::ConfigurationSpaceError);
+                        };
+                        notify = Some(VirtioPciNotify {
+                            offset_multiplier: data.option_value().unwrap_or(0),
+                            offset: data.offset(),
+                            io_memory,
+                        });
+                    }
+                    VirtioPciCpabilityType::IsrCfg => {}
+                    VirtioPciCpabilityType::DeviceCfg => {
+                        if data.memory_bar().is_none() {
+                            warn!("DeviceCfg capability does not use a memory BAR");
+                            return Err(BusProbeError::ConfigurationSpaceError);
+                        }
+                        device_cfg = Some(data);
+                    }
+                    VirtioPciCpabilityType::PciCfg => {}
                 }
-                VirtioPciCpabilityType::NotifyCfg => {
-                    notify = Some(VirtioPciNotify {
-                        offset_multiplier: data.option_value().unwrap(),
-                        offset: data.offset(),
-                        io_memory: data.memory_bar().unwrap().clone(),
-                    });
-                }
-                VirtioPciCpabilityType::IsrCfg => {}
-                VirtioPciCpabilityType::DeviceCfg => {
-                    device_cfg = Some(data);
-                }
-                VirtioPciCpabilityType::PciCfg => {}
             }
+            Ok(())
+        })();
+        if let Err(err) = parse_result {
+            return Err((err, common_device));
         }
-        let notify = notify.unwrap();
-        let common_cfg = common_cfg.unwrap();
-        let device_cfg = device_cfg.unwrap();
+        let notify = match notify {
+            Some(n) => n,
+            None => {
+                warn!("Missing NotifyCfg capability");
+                return Err((BusProbeError::ConfigurationSpaceError, common_device));
+            }
+        };
+        let common_cfg = match common_cfg {
+            Some(c) => c,
+            None => {
+                warn!("Missing CommonCfg capability");
+                return Err((BusProbeError::ConfigurationSpaceError, common_device));
+            }
+        };
+        let device_cfg = match device_cfg {
+            Some(d) => d,
+            None => {
+                warn!("Missing DeviceCfg capability");
+                return Err((BusProbeError::ConfigurationSpaceError, common_device));
+            }
+        };
 
-        // TODO: Support interrupt without MSI-X.
-        let msix = common_device.acquire_msix_capability().unwrap().unwrap();
+        let msix = match common_device.acquire_msix_capability() {
+            Ok(Some(msix)) => msix,
+            _ => {
+                warn!("MSI-X not available for virtio modern transport");
+                return Err((BusProbeError::ConfigurationSpaceError, common_device));
+            }
+        };
         let msix_manager = VirtioMsixManager::new(msix);
 
         Ok(Self {

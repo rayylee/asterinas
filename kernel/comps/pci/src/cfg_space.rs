@@ -7,8 +7,8 @@
 use bitflags::bitflags;
 use ostd::{
     Error, Result,
-    arch::device::io_port::{PortRead, PortWrite},
-    io::IoMem,
+    arch::device::io_port::{PortRead, PortWrite, ReadWriteAccess},
+    io::{IoMem, IoPort},
     mm::{PodOnce, VmIoOnce},
 };
 
@@ -248,8 +248,7 @@ impl Bar {
     pub fn acquire(&mut self) -> Result<BarAccess> {
         match self {
             Self::Memory(mem_bar) => mem_bar.acquire().cloned().map(BarAccess::Memory),
-            // TODO: Implement the `acquire` operation based on `IoPortAllocator`.
-            Self::Io(_) => Ok(BarAccess::Io),
+            Self::Io(io_bar) => Ok(BarAccess::Io(*io_bar)),
         }
     }
 
@@ -261,8 +260,7 @@ impl Bar {
     pub fn access(&self) -> Option<BarAccess> {
         match self {
             Self::Memory(mem_bar) => mem_bar.access().cloned().map(BarAccess::Memory),
-            // TODO: Implement the `access` operation based on `IoPortAllocator`.
-            Self::Io(_) => Some(BarAccess::Io),
+            Self::Io(io_bar) => Some(BarAccess::Io(*io_bar)),
         }
     }
 
@@ -292,7 +290,7 @@ pub enum BarAccess {
     /// Memory BAR
     Memory(IoMem),
     /// I/O BAR
-    Io,
+    Io(IoBar),
 }
 
 impl BarAccess {
@@ -300,8 +298,7 @@ impl BarAccess {
     pub fn read_once<T: PodOnce + PortRead>(&self, offset: usize) -> Result<T> {
         match self {
             Self::Memory(io_mem) => io_mem.read_once(offset),
-            // TODO: Implement the `read` operation based on `IoPortAllocator`.
-            Self::Io => Err(Error::IoError),
+            Self::Io(io_bar) => io_bar.read_once(offset),
         }
     }
 
@@ -309,8 +306,7 @@ impl BarAccess {
     pub fn write_once<T: PodOnce + PortWrite>(&self, offset: usize, value: T) -> Result<()> {
         match self {
             Self::Memory(io_mem) => io_mem.write_once(offset, &value),
-            // TODO: Implement the `write` operation based on `IoPortAllocator`.
-            Self::Io => Err(Error::IoError),
+            Self::Io(io_bar) => io_bar.write_once(offset, value),
         }
     }
 }
@@ -492,6 +488,43 @@ impl IoBar {
     /// Returns the BAR's size.
     pub fn size(&self) -> u32 {
         self.size
+    }
+
+    /// Reads a value of a specified type at a specified offset.
+    pub fn read_once<T: PodOnce + PortRead>(&self, offset: usize) -> Result<T> {
+        self.check_range::<T>(offset)?;
+        let port = self.base + offset as u32;
+        if port > u16::MAX as u32 {
+            return Err(Error::InvalidArgs);
+        }
+
+        let port = IoPort::<T, ReadWriteAccess>::acquire(port as u16)?;
+        Ok(port.read())
+    }
+
+    /// Writes a value of a specified type at a specified offset.
+    pub fn write_once<T: PodOnce + PortWrite>(&self, offset: usize, value: T) -> Result<()> {
+        self.check_range::<T>(offset)?;
+        let port = self.base + offset as u32;
+        if port > u16::MAX as u32 {
+            return Err(Error::InvalidArgs);
+        }
+
+        let port = IoPort::<T, ReadWriteAccess>::acquire(port as u16)?;
+        port.write(value);
+        Ok(())
+    }
+
+    fn check_range<T>(&self, offset: usize) -> Result<()> {
+        let access_size = size_of::<T>();
+        if offset
+            .checked_add(access_size)
+            .is_some_and(|end| end <= self.size as usize)
+        {
+            return Ok(());
+        }
+
+        Err(Error::InvalidArgs)
     }
 
     /// Creates an I/O port BAR structure.

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use aster_util::safe_ptr::SafePtr;
-use ostd::io::IoMem;
+use ostd::{bus::BusProbeError, io::IoMem};
 
 use super::capability::VirtioPciCapabilityData;
 use crate::transport::pci::capability::VirtioPciCpabilityType;
@@ -29,8 +29,13 @@ pub struct VirtioPciCommonCfg {
 }
 
 impl VirtioPciCommonCfg {
-    pub(super) fn new(cap: &VirtioPciCapabilityData) -> SafePtr<Self, IoMem> {
+    pub(super) fn new(
+        cap: &VirtioPciCapabilityData,
+    ) -> Result<SafePtr<Self, IoMem>, BusProbeError> {
         debug_assert!(cap.typ() == VirtioPciCpabilityType::CommonCfg);
-        SafePtr::new(cap.memory_bar().unwrap().clone(), cap.offset() as usize)
+        let mem = cap
+            .memory_bar()
+            .ok_or(BusProbeError::ConfigurationSpaceError)?;
+        Ok(SafePtr::new(mem.clone(), cap.offset() as usize))
     }
 }

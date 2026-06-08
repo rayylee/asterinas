@@ -120,6 +120,15 @@ struct VirtioBlockTopology {
 #[derive(Clone, Copy, Debug)]
 struct VirtioBlockFeature {
     support_flush: bool,
+    support_size_max: bool,
+    support_seg_max: bool,
+    support_geometry: bool,
+    support_blk_size: bool,
+    support_topology: bool,
+    support_config_wce: bool,
+    support_mq: bool,
+    support_discard: bool,
+    support_write_zeroes: bool,
 }
 
 impl VirtioBlockConfig {
@@ -138,9 +147,9 @@ impl VirtioBlockConfig {
 }
 
 impl ConfigManager<VirtioBlockConfig> {
-    pub(self) fn read_config(&self) -> VirtioBlockConfig {
+    pub(self) fn read_config(&self, features: VirtioBlockFeature) -> VirtioBlockConfig {
         let mut blk_config = VirtioBlockConfig::new_zeroed();
-        // Only following fields are defined in legacy interface.
+        // `capacity` always exists in both legacy and modern interfaces.
         let cap_low = self
             .read_once::<u32>(offset_of!(VirtioBlockConfig, capacity))
             .unwrap() as u64;
@@ -148,42 +157,105 @@ impl ConfigManager<VirtioBlockConfig> {
             .read_once::<u32>(offset_of!(VirtioBlockConfig, capacity) + 4)
             .unwrap() as u64;
         blk_config.capacity = (cap_high << 32) | cap_low;
-        blk_config.size_max = self
-            .read_once::<u32>(offset_of!(VirtioBlockConfig, size_max))
-            .unwrap();
-        blk_config.seg_max = self
-            .read_once::<u32>(offset_of!(VirtioBlockConfig, seg_max))
-            .unwrap();
-        blk_config.geometry.cylinders = self
-            .read_once::<u16>(
-                offset_of!(VirtioBlockConfig, geometry)
-                    + offset_of!(VirtioBlockGeometry, cylinders),
-            )
-            .unwrap();
-        blk_config.geometry.heads = self
-            .read_once::<u8>(
-                offset_of!(VirtioBlockConfig, geometry) + offset_of!(VirtioBlockGeometry, heads),
-            )
-            .unwrap();
-        blk_config.geometry.sectors = self
-            .read_once::<u8>(
-                offset_of!(VirtioBlockConfig, geometry) + offset_of!(VirtioBlockGeometry, sectors),
-            )
-            .unwrap();
-        blk_config.blk_size = self
-            .read_once::<u32>(offset_of!(VirtioBlockConfig, blk_size))
-            .unwrap();
 
-        if self.is_modern() {
-            // TODO: read more field if modern interface exists.
+        if features.support_size_max {
+            blk_config.size_max = self
+                .read_once::<u32>(offset_of!(VirtioBlockConfig, size_max))
+                .unwrap();
+        }
+        if features.support_seg_max {
+            blk_config.seg_max = self
+                .read_once::<u32>(offset_of!(VirtioBlockConfig, seg_max))
+                .unwrap();
+        }
+        if features.support_geometry {
+            blk_config.geometry.cylinders = self
+                .read_once::<u16>(
+                    offset_of!(VirtioBlockConfig, geometry)
+                        + offset_of!(VirtioBlockGeometry, cylinders),
+                )
+                .unwrap();
+            blk_config.geometry.heads = self
+                .read_once::<u8>(
+                    offset_of!(VirtioBlockConfig, geometry)
+                        + offset_of!(VirtioBlockGeometry, heads),
+                )
+                .unwrap();
+            blk_config.geometry.sectors = self
+                .read_once::<u8>(
+                    offset_of!(VirtioBlockConfig, geometry)
+                        + offset_of!(VirtioBlockGeometry, sectors),
+                )
+                .unwrap();
+        }
+        if features.support_blk_size {
+            blk_config.blk_size = self
+                .read_once::<u32>(offset_of!(VirtioBlockConfig, blk_size))
+                .unwrap();
+        } else {
+            blk_config.blk_size = VirtioBlockConfig::sector_size() as u32;
+        }
+
+        if self.is_modern() && features.support_topology {
+            blk_config.topology.physical_block_exp = self
+                .read_once::<u8>(
+                    offset_of!(VirtioBlockConfig, topology)
+                        + offset_of!(VirtioBlockTopology, physical_block_exp),
+                )
+                .unwrap();
+            blk_config.topology.alignment_offset = self
+                .read_once::<u8>(
+                    offset_of!(VirtioBlockConfig, topology)
+                        + offset_of!(VirtioBlockTopology, alignment_offset),
+                )
+                .unwrap();
+            blk_config.topology.min_io_size = self
+                .read_once::<u16>(
+                    offset_of!(VirtioBlockConfig, topology)
+                        + offset_of!(VirtioBlockTopology, min_io_size),
+                )
+                .unwrap();
+            blk_config.topology.opt_io_size = self
+                .read_once::<u32>(
+                    offset_of!(VirtioBlockConfig, topology)
+                        + offset_of!(VirtioBlockTopology, opt_io_size),
+                )
+                .unwrap();
+        }
+        if self.is_modern() && features.support_config_wce {
+            blk_config.writeback = self
+                .read_once::<u8>(offset_of!(VirtioBlockConfig, writeback))
+                .unwrap();
+        }
+        if self.is_modern() && features.support_mq {
+            blk_config.num_queues = self
+                .read_once::<u16>(offset_of!(VirtioBlockConfig, num_queues))
+                .unwrap();
+        }
+        if self.is_modern() && features.support_discard {
+            blk_config.max_discard_sectors = self
+                .read_once::<u32>(offset_of!(VirtioBlockConfig, max_discard_sectors))
+                .unwrap();
+            blk_config.max_discard_seg = self
+                .read_once::<u32>(offset_of!(VirtioBlockConfig, max_discard_seg))
+                .unwrap();
+            blk_config.discard_sector_alignment = self
+                .read_once::<u32>(offset_of!(VirtioBlockConfig, discard_sector_alignment))
+                .unwrap();
+        }
+        if self.is_modern() && features.support_write_zeroes {
+            blk_config.max_write_zeroes_sectors = self
+                .read_once::<u32>(offset_of!(VirtioBlockConfig, max_write_zeroes_sectors))
+                .unwrap();
+            blk_config.max_write_zeroes_seg = self
+                .read_once::<u32>(offset_of!(VirtioBlockConfig, max_write_zeroes_seg))
+                .unwrap();
+            blk_config.write_zeros_may_unmap = self
+                .read_once::<u8>(offset_of!(VirtioBlockConfig, write_zeros_may_unmap))
+                .unwrap();
         }
 
         blk_config
-    }
-
-    pub(self) fn block_size(&self) -> usize {
-        self.read_once::<u32>(offset_of!(VirtioBlockConfig, blk_size))
-            .unwrap() as usize
     }
 
     pub(self) fn capacity_sectors(&self) -> usize {
@@ -200,7 +272,18 @@ impl ConfigManager<VirtioBlockConfig> {
 
 impl VirtioBlockFeature {
     pub(self) fn new(transport: &dyn VirtioTransport) -> Self {
-        let support_flush = (transport.read_device_features() & BlockFeatures::FLUSH.bits()) != 0;
-        VirtioBlockFeature { support_flush }
+        let features = BlockFeatures::from_bits_truncate(transport.read_device_features());
+        Self {
+            support_flush: features.contains(BlockFeatures::FLUSH),
+            support_size_max: features.contains(BlockFeatures::SIZE_MAX),
+            support_seg_max: features.contains(BlockFeatures::SEG_MAX),
+            support_geometry: features.contains(BlockFeatures::GEOMETRY),
+            support_blk_size: features.contains(BlockFeatures::BLK_SIZE),
+            support_topology: features.contains(BlockFeatures::TOPOLOGY),
+            support_config_wce: features.contains(BlockFeatures::CONFIG_WCE),
+            support_mq: features.contains(BlockFeatures::MQ),
+            support_discard: features.contains(BlockFeatures::DISCARD),
+            support_write_zeroes: features.contains(BlockFeatures::WRITE_ZEROES),
+        }
     }
 }

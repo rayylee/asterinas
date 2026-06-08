@@ -19,6 +19,17 @@ pub(super) struct VirtioNetHdr {
                       // padding_reserved: u16,  // Only if VIRTIO_NET_F_HASH_REPORT negotiated
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Pod)]
+pub(super) struct VirtioNetHdrLegacy {
+    flags: Flags,
+    gso_type: u8,
+    hdr_len: u16,
+    gso_size: u16,
+    csum_start: u16,
+    csum_offset: u16,
+}
+
 bitflags! {
     #[repr(C)]
     #[derive(Default, Pod)]

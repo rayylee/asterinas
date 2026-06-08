@@ -76,7 +76,9 @@ impl VirtioPciLegacyTransport {
     pub(super) fn new(
         mut common_device: PciCommonDevice,
     ) -> Result<Self, (BusProbeError, PciCommonDevice)> {
-        let device_type = match common_device.device_id().device_id {
+        let device_id = common_device.device_id().device_id;
+        // Legacy PCI device IDs are assigned independently from the virtio device type values.
+        let device_type = match device_id {
             0x1000 => VirtioDeviceType::Network,
             0x1001 => VirtioDeviceType::Block,
             0x1002 => VirtioDeviceType::TraditionalMemoryBalloon,
@@ -85,10 +87,7 @@ impl VirtioPciLegacyTransport {
             0x1005 => VirtioDeviceType::Entropy,
             0x1009 => VirtioDeviceType::Transport9P,
             _ => {
-                warn!(
-                    "Unrecognized virtio-pci device ID: {:x?}",
-                    common_device.device_id().device_id
-                );
+                warn!("Unrecognized virtio-pci device ID: {:x?}", device_id);
                 return Err((BusProbeError::ConfigurationSpaceError, common_device));
             }
         };

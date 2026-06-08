@@ -214,11 +214,12 @@ impl DeviceInner {
     /// Creates and inits the device.
     fn init(mut transport: Box<dyn VirtioTransport>) -> Result<Arc<Self>, VirtioDeviceError> {
         let config_manager = VirtioBlockConfig::new_manager(transport.as_ref());
+        let features = VirtioBlockFeature::new(transport.as_ref());
 
-        let config = config_manager.read_config();
+        let config = config_manager.read_config(features);
         debug!("virio_blk_config = {:?}", config);
 
-        let block_size = config_manager.block_size();
+        let block_size = config.blk_size as usize;
         if block_size != VirtioBlockConfig::sector_size() {
             ostd::error!("block size {} is not supported yet", block_size);
             return Err(VirtioDeviceError::UnsupportedConfig);
@@ -233,8 +234,6 @@ impl DeviceInner {
                 "Multi-Queue Block IO Queueing Mechanism is not supported yet; using the first queue"
             );
         }
-
-        let features = VirtioBlockFeature::new(transport.as_ref());
 
         let queue = VirtQueue::new(0, Self::QUEUE_SIZE, transport.as_mut())?;
 
