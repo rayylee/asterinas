@@ -186,6 +186,12 @@ build and run Asterinas NixOS in a VM:
 
 See [The Asterinas Book](https://asterinas.github.io/book/) to learn more about the project.
 
+## Star History
+
+<p align="center">
+    <a href="https://star-history.com/#asterinas/asterinas&Date"><img src="https://api.star-history.com/svg?repos=asterinas/asterinas&type=Date" alt="Star History Chart" width="620"></a>
+</p>
+
 ## License
 
 Asterinas's source code and documentation primarily use the
