@@ -280,8 +280,8 @@ impl VirtQueue {
             return Err(AddBufsError::BufferTooSmall);
         }
 
+        let output_len = dma_bufs_len(outputs)?;
         let head = self.free_head.unwrap();
-        let mut output_len = 0;
 
         // Allocate descriptors from the free list.
         let mut last = self.free_head;
@@ -305,7 +305,7 @@ impl VirtQueue {
         }
         for output in outputs.iter() {
             let desc = &self.descs[current.unwrap() as usize];
-            output_len += set_dma_buf(
+            set_dma_buf(
                 &desc.ptr.borrow_vm().restrict::<TRights![Write, Dup]>(),
                 *output,
             );
@@ -417,6 +417,22 @@ impl VirtQueue {
         &mut self,
         min_bytes: usize,
     ) -> Result<(u16, u32), PopUsedError> {
+        self.pop_used_with_len_bound(min_bytes, |_, output_len| output_len as usize)
+    }
+
+    /// Pops a device-used buffer with a token-specific upper bound on used length.
+    ///
+    /// This is the same as [`Self::pop_used_with_min_bytes`], except `len_bound_fn` may increase the
+    /// maximum valid used length for protocols whose used ring length can include bytes from input
+    /// descriptors.
+    pub fn pop_used_with_len_bound<F>(
+        &mut self,
+        min_bytes: usize,
+        mut len_bound_fn: F,
+    ) -> Result<(u16, u32), PopUsedError>
+    where
+        F: FnMut(u16, u32) -> usize,
+    {
         loop {
             if !self.can_pop() {
                 return Err(PopUsedError::NotReady);
@@ -432,10 +448,10 @@ impl VirtQueue {
             let len = field_ptr!(&element_ptr, UsedElem, len).read_once().unwrap();
             self.last_used_idx = self.last_used_idx.wrapping_add(1);
 
-            let (desc, dma_len) = if let Some(desc) = self.descs.get_mut(index as usize)
-                && let Some(dma_len) = desc.len
+            let (desc, output_len) = if let Some(desc) = self.descs.get_mut(index as usize)
+                && let Some(output_len) = desc.len
             {
-                (desc, dma_len)
+                (desc, output_len)
             } else {
                 ostd::error!(
                     "invalid used token: {} (queue size: {})",
@@ -444,12 +460,13 @@ impl VirtQueue {
                 );
                 continue;
             };
-            if len > dma_len || (len as usize) < min_bytes {
+            let max_len = len_bound_fn(index as u16, output_len).max(output_len as usize);
+            if (len as usize) > max_len || (len as usize) < min_bytes {
                 ostd::error!(
                     "invalid used length: {} (expected {}..={})",
                     len,
                     min_bytes,
-                    dma_len,
+                    max_len,
                 );
                 continue;
             }
@@ -571,6 +588,20 @@ fn set_dma_buf<T: DmaBuf>(desc_ptr: &DescriptorPtr, buf: &T) -> u32 {
         .unwrap();
 
     len as u32
+}
+
+fn dma_bufs_len<T: DmaBuf>(bufs: &[&T]) -> Result<u32, AddBufsError> {
+    let mut total_len = 0u32;
+    for buf in bufs {
+        let len = buf.len();
+        if len > u32::MAX as usize {
+            return Err(AddBufsError::InvalidArgs);
+        }
+        total_len = total_len
+            .checked_add(len as u32)
+            .ok_or(AddBufsError::InvalidArgs)?;
+    }
+    Ok(total_len)
 }
 
 bitflags! {

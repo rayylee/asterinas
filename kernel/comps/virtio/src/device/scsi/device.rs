@@ -39,6 +39,7 @@ use super::{
 };
 use crate::{
     device::VirtioDeviceError,
+    dma_buf::DmaBuf,
     id_alloc::SyncIdAlloc,
     queue::VirtQueue,
     transport::{ConfigManager, VirtioTransport},
@@ -580,7 +581,17 @@ impl DeviceInner {
         loop {
             let submitted_request = {
                 let mut queue = self.request_queue.lock();
-                let Ok((token, _)) = queue.pop_used_with_min_bytes(COMMAND_RESPONSE_SIZE) else {
+                let submitted_requests = self.submitted_requests.lock();
+                let result =
+                    queue.pop_used_with_len_bound(COMMAND_RESPONSE_SIZE, |token, output_len| {
+                        submitted_requests
+                            .get(&token)
+                            .map(|request| request.max_used_len(output_len as usize))
+                            .unwrap_or(output_len as usize)
+                    });
+                drop(submitted_requests);
+
+                let Ok((token, _)) = result else {
                     return;
                 };
 
@@ -794,6 +805,13 @@ impl SubmittedRequest {
             transfer,
         }
     }
+
+    fn max_used_len(&self, output_len: usize) -> usize {
+        match self.transfer {
+            DataTransfer::DirectWrite => output_len.saturating_add(request_data_len(&self.request)),
+            _ => output_len,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -836,6 +854,10 @@ fn request_dma_slices(request: &BioRequest) -> impl Iterator<Item = &Slice<Arc<D
             .iter()
             .map(|segment| segment.inner_dma_slice())
     })
+}
+
+fn request_data_len(request: &BioRequest) -> usize {
+    request_dma_slices(request).map(|slice| slice.len()).sum()
 }
 
 fn sync_request_data_to_device(request: &BioRequest) {
