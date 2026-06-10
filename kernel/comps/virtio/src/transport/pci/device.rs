@@ -4,7 +4,10 @@ use alloc::{boxed::Box, sync::Arc};
 use core::fmt::Debug;
 
 use aster_pci::{
-    PciDeviceId, bus::PciDevice, cfg_space::BarAccess, common_device::PciCommonDevice,
+    PciDeviceId,
+    bus::PciDevice,
+    cfg_space::{BarAccess, PciGeneralDeviceCfgOffset},
+    common_device::PciCommonDevice,
 };
 use aster_util::{field_ptr, safe_ptr::SafePtr};
 use ostd::{
@@ -268,13 +271,14 @@ impl VirtioPciModernTransport {
         mut common_device: PciCommonDevice,
     ) -> Result<Self, (BusProbeError, PciCommonDevice)> {
         let device_id = common_device.device_id().device_id;
-        let device_type_value = if device_id <= 0x1040 {
-            device_id - 0x1000
-        } else {
-            device_id - 0x1040
+        let subsystem_id = common_device
+            .location()
+            .read16(PciGeneralDeviceCfgOffset::SubsystemId as u16);
+        let Some(device_type_value) = modern_device_type_value(device_id, subsystem_id) else {
+            warn!("Unrecognized virtio-pci device ID: {:x?}", device_id);
+            return Err((BusProbeError::DeviceNotMatch, common_device));
         };
-
-        let device_type = match VirtioDeviceType::try_from(device_type_value as u8) {
+        let device_type = match VirtioDeviceType::try_from(device_type_value) {
             Ok(device) => device,
             Err(_) => {
                 warn!("Unrecognized virtio-pci device ID: {:x?}", device_id);
@@ -324,5 +328,41 @@ impl VirtioPciModernTransport {
             msix_manager,
             device_type,
         })
+    }
+}
+
+fn modern_device_type_value(device_id: u16, subsystem_id: u16) -> Option<u8> {
+    let value = if device_id < 0x1040 {
+        // Transitional devices keep the legacy PCI device ID even when driven
+        // through modern capabilities. Their virtio device type is stored in
+        // the PCI subsystem device ID.
+        subsystem_id
+    } else {
+        device_id.checked_sub(0x1040)?
+    };
+
+    value.try_into().ok()
+}
+
+#[cfg(ktest)]
+mod tests {
+    use ostd::prelude::*;
+
+    use super::*;
+
+    #[ktest]
+    fn pci_modern_maps_transitional_scsi_device_id() {
+        assert_eq!(
+            modern_device_type_value(0x1004, VirtioDeviceType::Scsi as u16),
+            Some(VirtioDeviceType::Scsi as u8)
+        );
+    }
+
+    #[ktest]
+    fn pci_modern_maps_modern_only_scsi_device_id() {
+        assert_eq!(
+            modern_device_type_value(0x1048, 0),
+            Some(VirtioDeviceType::Scsi as u8)
+        );
     }
 }

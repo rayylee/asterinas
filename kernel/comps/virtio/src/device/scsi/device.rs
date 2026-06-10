@@ -32,10 +32,10 @@ use spin::Once;
 use super::{
     COMMAND_REQUEST_SIZE, COMMAND_RESPONSE_SIZE, CONTROL_QUEUE_INDEX, DEFAULT_QUEUE_SIZE,
     DEVICE_NAME, EVENT_QUEUE_INDEX, INQUIRY_DATA_LEN, LogicalBlockSize, Lun, MODE_SENSE_HEADER_LEN,
-    READ_CAPACITY_10_DATA_LEN, READ_CAPACITY_16_DATA_LEN, REQUEST_QUEUE_INDEX, ScsiCapacity,
-    ScsiCdb, ScsiCommandRequest, ScsiCommandResponse, ScsiDeviceKind, ScsiIoPlan, VirtioScsiConfig,
-    bounded_queue_size, formatted_cdrom_name, formatted_disk_name, parse_write_protect,
-    supported_features,
+    READ_CAPACITY_10_DATA_LEN, READ_CAPACITY_16_DATA_LEN, REQUEST_QUEUE_INDEX,
+    REQUEST_SENSE_DATA_LEN, ScsiCapacity, ScsiCdb, ScsiCommandRequest, ScsiCommandResponse,
+    ScsiDeviceKind, ScsiIoPlan, VirtioScsiConfig, bounded_queue_size, formatted_cdrom_name,
+    formatted_disk_name, parse_write_protect, supported_features,
 };
 use crate::{
     device::VirtioDeviceError,
@@ -385,7 +385,7 @@ impl DeviceInner {
     fn probe_target(&self, target: u8) -> Option<ScsiLogicalUnitInfo> {
         let lun = Lun::new(target, 0).unwrap();
 
-        let inquiry = match self.execute_command_sync(
+        let inquiry = match self.execute_probe_command_sync(
             lun,
             ScsiCdb::inquiry(INQUIRY_DATA_LEN as u16),
             INQUIRY_DATA_LEN,
@@ -424,7 +424,7 @@ impl DeviceInner {
 
     fn read_capacity(&self, lun: Lun) -> Option<ScsiCapacity> {
         let data = self
-            .execute_command_sync(lun, ScsiCdb::read_capacity_10(), READ_CAPACITY_10_DATA_LEN)
+            .execute_probe_command_sync(lun, ScsiCdb::read_capacity_10(), READ_CAPACITY_10_DATA_LEN)
             .ok()?;
         let capacity = ScsiCapacity::parse_read_capacity_10(&data)?;
         if capacity.last_lba != u32::MAX as u64 {
@@ -432,7 +432,7 @@ impl DeviceInner {
         }
 
         let data = self
-            .execute_command_sync(
+            .execute_probe_command_sync(
                 lun,
                 ScsiCdb::read_capacity_16(READ_CAPACITY_16_DATA_LEN as u32),
                 READ_CAPACITY_16_DATA_LEN,
@@ -443,7 +443,7 @@ impl DeviceInner {
 
     fn read_write_protect(&self, lun: Lun) -> Option<bool> {
         let data = self
-            .execute_command_sync(
+            .execute_probe_command_sync(
                 lun,
                 ScsiCdb::mode_sense_6(MODE_SENSE_HEADER_LEN as u8),
                 MODE_SENSE_HEADER_LEN,
@@ -707,6 +707,31 @@ impl DeviceInner {
         }
 
         Ok(data)
+    }
+
+    fn execute_probe_command_sync(
+        &self,
+        lun: Lun,
+        cdb: ScsiCdb,
+        data_in_len: usize,
+    ) -> Result<Vec<u8>, ScsiCommandError> {
+        const MAX_RETRIES: usize = 3;
+
+        for retry in 0..=MAX_RETRIES {
+            match self.execute_command_sync(lun, cdb, data_in_len) {
+                Ok(data) => return Ok(data),
+                Err(ScsiCommandError::CommandFailed) if retry < MAX_RETRIES => {
+                    let _ = self.execute_command_sync(
+                        lun,
+                        ScsiCdb::request_sense(REQUEST_SENSE_DATA_LEN as u8),
+                        REQUEST_SENSE_DATA_LEN,
+                    );
+                }
+                Err(error) => return Err(error),
+            }
+        }
+
+        Err(ScsiCommandError::CommandFailed)
     }
 
     fn prepare_command_request(&self, id: usize, lun: Lun, cdb: ScsiCdb) -> Slice<Arc<DmaStream>> {

@@ -29,8 +29,9 @@ pub(super) const INQUIRY_DATA_LEN: usize = 96;
 pub(super) const MODE_SENSE_HEADER_LEN: usize = 4;
 pub(super) const READ_CAPACITY_10_DATA_LEN: usize = 8;
 pub(super) const READ_CAPACITY_16_DATA_LEN: usize = 32;
+pub(super) const REQUEST_SENSE_DATA_LEN: usize = 18;
 
-const LUN_ADDRESSING_METHOD: u8 = 1;
+const FLAT_SPACE_LUN_ADDRESSING_METHOD: u8 = 0x40;
 const MAX_LUN: u16 = 0x3fff;
 const MAX_LOGICAL_BLOCK_SIZE: usize = 4096;
 
@@ -229,9 +230,9 @@ impl Lun {
         }
 
         let mut bytes = [0; 8];
-        bytes[0] = LUN_ADDRESSING_METHOD;
+        bytes[0] = 1;
         bytes[1] = target;
-        bytes[2] = (lun >> 8) as u8;
+        bytes[2] = (lun >> 8) as u8 | FLAT_SPACE_LUN_ADDRESSING_METHOD;
         bytes[3] = lun as u8;
 
         Some(Self(bytes))
@@ -259,6 +260,13 @@ impl ScsiCdb {
         // Disable block descriptors and request all current mode pages.
         cdb[1] = 0x08;
         cdb[2] = 0x3f;
+        cdb[4] = allocation_len;
+        Self(cdb)
+    }
+
+    pub(super) fn request_sense(allocation_len: u8) -> Self {
+        let mut cdb = [0; DEFAULT_CDB_SIZE];
+        cdb[0] = ScsiOpcode::RequestSense as u8;
         cdb[4] = allocation_len;
         Self(cdb)
     }
@@ -307,6 +315,7 @@ impl ScsiCdb {
 #[repr(u8)]
 #[derive(Clone, Copy, Debug)]
 enum ScsiOpcode {
+    RequestSense = 0x03,
     Inquiry = 0x12,
     ModeSense6 = 0x1a,
     ReadCapacity10 = 0x25,
@@ -487,11 +496,11 @@ mod tests {
 
     #[ktest]
     fn scsi_encodes_lun0_for_targets() {
-        assert_eq!(Lun::new(0, 0).unwrap().bytes(), [1, 0, 0, 0, 0, 0, 0, 0]);
-        assert_eq!(Lun::new(7, 0).unwrap().bytes(), [1, 7, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(Lun::new(0, 0).unwrap().bytes(), [1, 0, 0x40, 0, 0, 0, 0, 0]);
+        assert_eq!(Lun::new(7, 0).unwrap().bytes(), [1, 7, 0x40, 0, 0, 0, 0, 0]);
         assert_eq!(
             Lun::new(7, 0x1234).unwrap().bytes(),
-            [1, 7, 0x12, 0x34, 0, 0, 0, 0]
+            [1, 7, 0x52, 0x34, 0, 0, 0, 0]
         );
         assert!(Lun::new(0, 0x4000).is_none());
     }
@@ -503,6 +512,9 @@ mod tests {
 
         let capacity10 = ScsiCdb::read_capacity_10().into_bytes();
         assert_eq!(capacity10[0], 0x25);
+
+        let request_sense = ScsiCdb::request_sense(18).into_bytes();
+        assert_eq!(&request_sense[..6], &[0x03, 0, 0, 0, 18, 0]);
 
         let capacity16 = ScsiCdb::read_capacity_16(32).into_bytes();
         assert_eq!(capacity16[0], 0x9e);
