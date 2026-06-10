@@ -2,7 +2,9 @@
 
 use aster_block::{BlockDevice, SECTOR_SIZE};
 use aster_nvme::NvmeBlockDevice;
-use aster_virtio::device::block::device::BlockDevice as VirtIoBlockDevice;
+use aster_virtio::device::{
+    block::device::BlockDevice as VirtIoBlockDevice, scsi::device::ScsiBlockDevice,
+};
 use device_id::DeviceId;
 use ostd::mm::VmIo;
 
@@ -45,6 +47,18 @@ pub(super) fn init_in_first_kthread() {
                 let nvme_block_device = device_clone.downcast_ref::<NvmeBlockDevice>().unwrap();
                 loop {
                     nvme_block_device.handle_requests();
+                }
+            };
+            ThreadOptions::new(task_fn).spawn();
+        }
+        // Spawn threads for virtio-scsi block devices.
+        else if device.downcast_ref::<ScsiBlockDevice>().is_some() {
+            let device_clone = device.clone();
+            let task_fn = move || {
+                info!("spawn the virtio-scsi thread");
+                let scsi_block_device = device_clone.downcast_ref::<ScsiBlockDevice>().unwrap();
+                loop {
+                    scsi_block_device.handle_requests();
                 }
             };
             ThreadOptions::new(task_fn).spawn();

@@ -376,6 +376,11 @@ impl VirtQueue {
         self.descs.len() - self.num_used as usize
     }
 
+    /// Returns the number of descriptors managed by the driver.
+    pub fn queue_size(&self) -> u16 {
+        self.descs.len() as u16
+    }
+
     /// Pops a device-used buffer and returns the token and the buffer length.
     ///
     /// When successful, the following is guaranteed:

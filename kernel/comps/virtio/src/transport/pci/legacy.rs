@@ -81,7 +81,7 @@ impl VirtioPciLegacyTransport {
             0x1001 => VirtioDeviceType::Block,
             0x1002 => VirtioDeviceType::TraditionalMemoryBalloon,
             0x1003 => VirtioDeviceType::Console,
-            0x1004 => VirtioDeviceType::ScsiHost,
+            0x1004 => VirtioDeviceType::Scsi,
             0x1005 => VirtioDeviceType::Entropy,
             0x1009 => VirtioDeviceType::Transport9P,
             _ => {

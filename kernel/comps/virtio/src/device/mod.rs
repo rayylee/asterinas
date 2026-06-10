@@ -10,6 +10,7 @@ pub mod entropy;
 pub mod filesystem;
 pub mod input;
 pub mod network;
+pub mod scsi;
 pub mod socket;
 
 #[repr(u8)]
@@ -23,7 +24,7 @@ pub(crate) enum VirtioDeviceType {
     TraditionalMemoryBalloon = 5,
     IoMemory = 6,
     Rpmsg = 7,
-    ScsiHost = 8,
+    Scsi = 8,
     Transport9P = 9,
     Mac80211Wlan = 10,
     RprocSerial = 11,

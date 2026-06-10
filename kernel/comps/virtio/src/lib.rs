@@ -17,7 +17,8 @@ use component::{ComponentInitError, init_component};
 use device::{
     VirtioDeviceType, block::device::BlockDevice, console::device::ConsoleDevice,
     entropy::device::EntropyDevice, filesystem::device::FileSystemDevice,
-    input::device::InputDevice, network::device::NetworkDevice, socket::device::SocketDevice,
+    input::device::InputDevice, network::device::NetworkDevice, scsi::device::ScsiDevice,
+    socket::device::SocketDevice,
 };
 use ostd::{error, warn};
 use spin::Once;
@@ -81,6 +82,7 @@ fn virtio_component_init() -> Result<(), ComponentInitError> {
             VirtioDeviceType::Entropy => EntropyDevice::init(transport),
             VirtioDeviceType::Input => InputDevice::init(transport),
             VirtioDeviceType::Network => NetworkDevice::init(transport),
+            VirtioDeviceType::Scsi => ScsiDevice::init(transport),
             VirtioDeviceType::Socket => SocketDevice::init(transport),
             VirtioDeviceType::FileSystem => FileSystemDevice::init(transport),
             _ => {
@@ -115,6 +117,7 @@ fn negotiate_features(transport: &mut Box<dyn VirtioTransport>) {
     let device_support_features = match transport.device_type() {
         VirtioDeviceType::Network => NetworkDevice::negotiate_features(device_specified_features),
         VirtioDeviceType::Block => BlockDevice::negotiate_features(device_specified_features),
+        VirtioDeviceType::Scsi => ScsiDevice::negotiate_features(device_specified_features),
         VirtioDeviceType::Input => InputDevice::negotiate_features(device_specified_features),
         VirtioDeviceType::Console => ConsoleDevice::negotiate_features(device_specified_features),
         VirtioDeviceType::Socket => SocketDevice::negotiate_features(device_specified_features),
