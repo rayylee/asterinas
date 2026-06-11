@@ -38,7 +38,7 @@ in pkgs.stdenv.mkDerivation {
   name = "aster_nixos_installer";
   buildCommand = ''
     mkdir -p $out/{bin,etc_nixos}
-    cp ${install_aster_nixos} $out/bin/install_aster_nixos.sh
+    install -m 755 ${install_aster_nixos} $out/bin/aster-install
     cp -L ${aster_configuration} $out/etc_nixos/aster_configuration.nix
     cp -L ${etc-nixos}/${config-file-name} $out/etc_nixos/configuration.nix
     cp -r ${etc-nixos}/modules $out/etc_nixos/modules
