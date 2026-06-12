@@ -4,7 +4,10 @@ use aster_block::{BlockDevice, SECTOR_SIZE};
 use aster_nvme::NvmeBlockDevice;
 use aster_virtio::device::block::device::BlockDevice as VirtIoBlockDevice;
 use device_id::DeviceId;
-use ostd::mm::VmIo;
+use ostd::{
+    cpu::{CpuId, CpuSet, num_cpus},
+    mm::VmIo,
+};
 
 use crate::{
     device::{Device, DeviceType, DevtmpfsInodeMeta, add_node},
@@ -26,16 +29,21 @@ pub(super) fn init_in_first_kthread() {
         }
 
         // Spawn threads for virtio block devices
-        if device.downcast_ref::<VirtIoBlockDevice>().is_some() {
-            let device_clone = device.clone();
-            let task_fn = move || {
-                info!("spawn the virtio-block thread");
-                let virtio_block_device = device_clone.downcast_ref::<VirtIoBlockDevice>().unwrap();
-                loop {
-                    virtio_block_device.handle_requests();
-                }
-            };
-            ThreadOptions::new(task_fn).spawn();
+        if let Some(virtio_block_device) = device.downcast_ref::<VirtIoBlockDevice>() {
+            for queue_index in 0..virtio_block_device.num_queues() {
+                let device_clone = device.clone();
+                let task_fn = move || {
+                    info!("spawn the virtio-block thread for queue {}", queue_index);
+                    let virtio_block_device =
+                        device_clone.downcast_ref::<VirtIoBlockDevice>().unwrap();
+                    loop {
+                        virtio_block_device.handle_requests(queue_index);
+                    }
+                };
+                ThreadOptions::new(task_fn)
+                    .cpu_affinity(cpu_affinity_for_queue(queue_index))
+                    .spawn();
+            }
         }
         // Spawn threads for NVMe block devices
         else if device.downcast_ref::<NvmeBlockDevice>().is_some() {
@@ -50,6 +58,12 @@ pub(super) fn init_in_first_kthread() {
             ThreadOptions::new(task_fn).spawn();
         }
     }
+}
+
+fn cpu_affinity_for_queue(queue_index: usize) -> CpuSet {
+    let mut cpu_affinity = CpuSet::new_empty();
+    cpu_affinity.add(CpuId::new((queue_index % num_cpus()) as u32));
+    cpu_affinity
 }
 
 pub(super) fn init_in_first_process(path_resolver: &PathResolver) -> Result<()> {

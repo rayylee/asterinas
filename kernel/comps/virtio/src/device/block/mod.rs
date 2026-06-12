@@ -120,6 +120,7 @@ struct VirtioBlockTopology {
 #[derive(Clone, Copy, Debug)]
 struct VirtioBlockFeature {
     support_flush: bool,
+    support_mq: bool,
 }
 
 impl VirtioBlockConfig {
@@ -134,6 +135,10 @@ impl VirtioBlockConfig {
 
     pub(self) const fn sector_size() -> usize {
         SECTOR_SIZE
+    }
+
+    pub(self) fn num_queues(&self) -> u16 {
+        self.num_queues
     }
 }
 
@@ -176,6 +181,9 @@ impl ConfigManager<VirtioBlockConfig> {
 
         if self.is_modern() {
             // TODO: read more field if modern interface exists.
+            blk_config.num_queues = self
+                .read_once::<u16>(offset_of!(VirtioBlockConfig, num_queues))
+                .unwrap();
         }
 
         blk_config
@@ -200,7 +208,10 @@ impl ConfigManager<VirtioBlockConfig> {
 
 impl VirtioBlockFeature {
     pub(self) fn new(transport: &dyn VirtioTransport) -> Self {
-        let support_flush = (transport.read_device_features() & BlockFeatures::FLUSH.bits()) != 0;
-        VirtioBlockFeature { support_flush }
+        let features = BlockFeatures::from_bits_truncate(transport.read_device_features());
+        VirtioBlockFeature {
+            support_flush: features.contains(BlockFeatures::FLUSH),
+            support_mq: features.contains(BlockFeatures::MQ),
+        }
     }
 }
