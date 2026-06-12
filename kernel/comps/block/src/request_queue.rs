@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use ostd::sync::{Mutex, WaitQueue};
+use ostd::{
+    cpu::CpuId,
+    sync::{Mutex, WaitQueue},
+};
 
 use super::{
     bio::{BioEnqueueError, BioType, SubmittedBio},
@@ -129,7 +132,69 @@ impl Debug for BioRequestSingleQueue {
     }
 }
 
-/// A block I/O request dequeued from [`BioRequestSingleQueue`].
+/// A block I/O request queue backed by multiple internal FIFO queues.
+///
+/// Enqueued requests are dispatched by the current CPU ID. Each internal
+/// queue preserves the FIFO and merge semantics of [`BioRequestSingleQueue`],
+/// while no merge is attempted across queues.
+pub struct BioRequestMultiQueue {
+    queues: Vec<BioRequestSingleQueue>,
+    max_nr_segments_per_bio: usize,
+}
+
+impl BioRequestMultiQueue {
+    /// Creates an empty multi-queue with the given number of internal queues.
+    pub fn new(num_queues: usize) -> Self {
+        Self::with_max_nr_segments_per_bio(num_queues, usize::MAX)
+    }
+
+    /// Creates an empty multi-queue with the upper bound for segments per bio.
+    pub fn with_max_nr_segments_per_bio(num_queues: usize, max_nr_segments_per_bio: usize) -> Self {
+        let num_queues = num_queues.max(1);
+        let queues = (0..num_queues)
+            .map(|_| BioRequestSingleQueue::with_max_nr_segments_per_bio(max_nr_segments_per_bio))
+            .collect();
+
+        Self {
+            queues,
+            max_nr_segments_per_bio,
+        }
+    }
+
+    /// Returns the number of internal queues.
+    pub fn num_queues(&self) -> usize {
+        self.queues.len()
+    }
+
+    /// Returns the upper limit for the number of segments per bio.
+    pub fn max_nr_segments_per_bio(&self) -> usize {
+        self.max_nr_segments_per_bio
+    }
+
+    /// Enqueues a `SubmittedBio` to one internal queue selected by the current CPU.
+    pub fn enqueue(&self, bio: SubmittedBio) -> Result<(), BioEnqueueError> {
+        let current_cpu_id: u32 = CpuId::current_racy().into();
+        let queue_index = current_cpu_id as usize % self.num_queues();
+
+        self.queues[queue_index].enqueue(bio)
+    }
+
+    /// Dequeues a `BioRequest` from the internal queue with the given index.
+    pub fn dequeue(&self, queue_index: usize) -> BioRequest {
+        self.queues[queue_index].dequeue()
+    }
+}
+
+impl Debug for BioRequestMultiQueue {
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+        f.debug_struct("BioRequestMultiQueue")
+            .field("num_queues", &self.num_queues())
+            .field("queues", &self.queues)
+            .finish()
+    }
+}
+
+/// A block I/O request dequeued from [`BioRequestSingleQueue`] or [`BioRequestMultiQueue`].
 ///
 /// This `BioRequest` type is more friendly to storage medium than `SubmittedBio` for two reasons.
 ///
