@@ -4,6 +4,8 @@
 
 set -e
 
+./aio/aio
+
 ./epoll/epoll_err
 ./epoll/poll_err
 ./epoll/test_epoll_pwait.sh

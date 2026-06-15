@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
+pub(crate) mod aio;
 mod clone;
 pub mod credentials;
 mod execve;

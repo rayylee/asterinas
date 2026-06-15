@@ -59,6 +59,17 @@ fn do_sys_eventfd2(init_val: u32, flags: Flags, ctx: &Context) -> Result<Syscall
     Ok(SyscallReturn::Return(fd.into()))
 }
 
+pub(super) fn is_event_file(file: &Arc<dyn FileLike>) -> bool {
+    file.downcast_ref::<EventFile>().is_some()
+}
+
+pub(super) fn signal_file(file: &Arc<dyn FileLike>) -> Result<()> {
+    let event_file = file
+        .downcast_ref::<EventFile>()
+        .ok_or_else(|| Error::with_message(Errno::EINVAL, "the file is not an eventfd"))?;
+    event_file.add_counter_val(1)
+}
+
 bitflags! {
     struct Flags: u32 {
         const EFD_SEMAPHORE = 1;

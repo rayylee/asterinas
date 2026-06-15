@@ -87,6 +87,11 @@ impl<'a> CurrentUserSpace<'a> {
         self.0.as_ref().unwrap()
     }
 
+    /// Clones the current VMAR as a strong reference.
+    pub(crate) fn vmar_arc(&self) -> Arc<Vmar> {
+        self.0.as_ref().unwrap().clone_arc()
+    }
+
     /// Takes a snapshot of the current VMAR identity.
     pub fn vmar_snapshot(&self) -> VmarSnapshot {
         VmarSnapshot::from(self.0.as_ref().unwrap().clone_weak())

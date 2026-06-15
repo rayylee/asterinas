@@ -20,6 +20,7 @@ mod arch;
 
 mod accept;
 mod access;
+mod aio;
 mod alarm;
 #[cfg(target_arch = "x86_64")]
 mod arch_prctl;

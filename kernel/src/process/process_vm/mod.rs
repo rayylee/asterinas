@@ -25,6 +25,7 @@ pub use self::{
         aux_vec::{AuxKey, AuxVec},
     },
 };
+use super::aio::AioTable;
 use crate::{
     fs::vfs::path::Path,
     prelude::*,
@@ -77,6 +78,8 @@ pub struct ProcessVm {
     data_range: SpinLock<Range<Vaddr>>,
     /// The executable file.
     executable_file: Path,
+    /// The native AIO context table.
+    aio_table: AioTable,
     /// The base address for vDSO segment
     #[cfg(target_arch = "riscv64")]
     vdso_base: AtomicUsize,
@@ -91,6 +94,7 @@ impl ProcessVm {
             code_range: SpinLock::new(0..0),
             data_range: SpinLock::new(0..0),
             executable_file,
+            aio_table: AioTable::new(),
             #[cfg(target_arch = "riscv64")]
             vdso_base: AtomicUsize::new(0),
         }
@@ -104,6 +108,7 @@ impl ProcessVm {
             code_range: SpinLock::new(process_vm.code_range.lock().clone()),
             data_range: SpinLock::new(process_vm.data_range.lock().clone()),
             executable_file: process_vm.executable_file.clone(),
+            aio_table: AioTable::new(),
             #[cfg(target_arch = "riscv64")]
             vdso_base: AtomicUsize::new(process_vm.vdso_base.load(Ordering::Relaxed)),
         }
@@ -132,6 +137,11 @@ impl ProcessVm {
     /// Returns a reference to the executable `Path`.
     pub fn executable_file(&self) -> &Path {
         &self.executable_file
+    }
+
+    /// Returns the native AIO context table.
+    pub(crate) fn aio_table(&self) -> &AioTable {
+        &self.aio_table
     }
 
     /// Maps and writes the initial portion of the main stack of a process.

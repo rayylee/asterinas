@@ -13,6 +13,10 @@ macro_rules! import_generic_syscall_entries {
         use $crate::syscall::{
             accept::{sys_accept, sys_accept4},
             access::{sys_faccessat, sys_faccessat2},
+            aio::{
+                sys_io_cancel, sys_io_destroy, sys_io_getevents, sys_io_pgetevents, sys_io_setup,
+                sys_io_submit,
+            },
             bind::sys_bind,
             brk::sys_brk,
             capget::sys_capget,
@@ -203,6 +207,11 @@ macro_rules! define_syscalls_with_generic_syscall_table {
 
         $crate::syscall::impl_syscall_nums_and_dispatch_fn! {
             // Generic syscalls
+            SYS_IO_SETUP = 0                 => sys_io_setup(args[..2]);
+            SYS_IO_DESTROY = 1               => sys_io_destroy(args[..1]);
+            SYS_IO_SUBMIT = 2                => sys_io_submit(args[..3]);
+            SYS_IO_CANCEL = 3                => sys_io_cancel(args[..3]);
+            SYS_IO_GETEVENTS = 4             => sys_io_getevents(args[..5]);
             SYS_SETXATTR = 5                 => sys_setxattr(args[..5]);
             SYS_LSETXATTR = 6                => sys_lsetxattr(args[..5]);
             SYS_FSETXATTR = 7                => sys_fsetxattr(args[..5]);
@@ -398,6 +407,7 @@ macro_rules! define_syscalls_with_generic_syscall_table {
             SYS_PREADV2 = 286                => sys_preadv2(args[..6]);
             SYS_PWRITEV2 = 287               => sys_pwritev2(args[..6]);
             SYS_STATX = 291                  => sys_statx(args[..5]);
+            SYS_IO_PGETEVENTS = 292          => sys_io_pgetevents(args[..6]);
             SYS_PIDFD_SEND_SIGNAL = 424      => sys_pidfd_send_signal(args[..4]);
             SYS_PIDFD_OPEN = 434             => sys_pidfd_open(args[..2]);
             SYS_CLONE3 = 435                 => sys_clone3(args[..2], &user_ctx);

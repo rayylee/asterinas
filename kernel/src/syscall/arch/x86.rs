@@ -5,6 +5,10 @@
 use super::{
     accept::{sys_accept, sys_accept4},
     access::{sys_access, sys_faccessat, sys_faccessat2},
+    aio::{
+        sys_io_cancel, sys_io_destroy, sys_io_getevents, sys_io_pgetevents, sys_io_setup,
+        sys_io_submit,
+    },
     alarm::sys_alarm,
     arch_prctl::sys_arch_prctl,
     bind::sys_bind,
@@ -343,6 +347,11 @@ impl_syscall_nums_and_dispatch_fn! {
     SYS_FUTEX = 202            => sys_futex(args[..6]);
     SYS_SCHED_SETAFFINITY = 203 => sys_sched_setaffinity(args[..3]);
     SYS_SCHED_GETAFFINITY = 204 => sys_sched_getaffinity(args[..3]);
+    SYS_IO_SETUP = 206         => sys_io_setup(args[..2]);
+    SYS_IO_DESTROY = 207       => sys_io_destroy(args[..1]);
+    SYS_IO_GETEVENTS = 208     => sys_io_getevents(args[..5]);
+    SYS_IO_SUBMIT = 209        => sys_io_submit(args[..3]);
+    SYS_IO_CANCEL = 210        => sys_io_cancel(args[..3]);
     SYS_EPOLL_CREATE = 213     => sys_epoll_create(args[..1]);
     SYS_GETDENTS64 = 217       => sys_getdents64(args[..3]);
     SYS_SET_TID_ADDRESS = 218  => sys_set_tid_address(args[..1]);
@@ -413,6 +422,7 @@ impl_syscall_nums_and_dispatch_fn! {
     SYS_PREADV2 = 327          => sys_preadv2(args[..6]);
     SYS_PWRITEV2 = 328         => sys_pwritev2(args[..6]);
     SYS_STATX = 332            => sys_statx(args[..5]);
+    SYS_IO_PGETEVENTS = 333    => sys_io_pgetevents(args[..6]);
     SYS_PIDFD_SEND_SIGNAL = 424 => sys_pidfd_send_signal(args[..4]);
     SYS_PIDFD_OPEN = 434       => sys_pidfd_open(args[..2]);
     SYS_CLONE3 = 435           => sys_clone3(args[..2], &user_ctx);
