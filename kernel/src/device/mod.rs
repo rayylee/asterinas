@@ -14,6 +14,7 @@ use alloc::borrow::Cow;
 use device_id::DeviceId;
 pub use mem::{getrandom, geturandom};
 pub use pty::{PtyMaster, PtySlave, new_pty_pair};
+pub(crate) use registry::block_device_from_file;
 pub use registry::lookup;
 
 use crate::{

@@ -164,6 +164,88 @@ impl VmIo for dyn BlockDevice {
 }
 
 impl dyn BlockDevice {
+    /// Asynchronously reads consecutive bytes of several sectors in size.
+    pub fn read_bytes_async_with<F>(
+        &self,
+        offset: usize,
+        read_len: usize,
+        complete_fn_builder: F,
+    ) -> ostd::Result<()>
+    where
+        F: FnOnce(BioSegment) -> BioCompleteFn,
+    {
+        if !is_sector_aligned(offset) || !is_sector_aligned(read_len) {
+            return Err(ostd::Error::InvalidArgs);
+        }
+        if read_len == 0 {
+            return Ok(());
+        }
+
+        let num_blocks = {
+            let first = Bid::from_offset(offset).to_raw();
+            let last = Bid::from_offset(offset + read_len - 1).to_raw();
+            (last - first + 1) as usize
+        };
+        let bio_segment = BioSegment::alloc_inner(
+            num_blocks,
+            offset % BLOCK_SIZE,
+            read_len,
+            BioDirection::FromDevice,
+        );
+        let complete_fn = complete_fn_builder(bio_segment.clone());
+        let bio = Bio::new(
+            BioType::Read,
+            Sid::from_offset(offset),
+            vec![bio_segment],
+            Some(complete_fn),
+        );
+
+        let mut io_batch = IoBatch::with_capacity(1);
+        bio.submit(self, &mut io_batch)?;
+        Ok(())
+    }
+
+    /// Asynchronously writes consecutive bytes of several sectors in size.
+    pub fn write_bytes_async_with(
+        &self,
+        offset: usize,
+        buf: &[u8],
+        complete_fn: BioCompleteFn,
+    ) -> ostd::Result<()> {
+        let write_len = buf.len();
+        if !is_sector_aligned(offset) || !is_sector_aligned(write_len) {
+            return Err(ostd::Error::InvalidArgs);
+        }
+        if write_len == 0 {
+            return Ok(());
+        }
+
+        let bio = {
+            let num_blocks = {
+                let first = Bid::from_offset(offset).to_raw();
+                let last = Bid::from_offset(offset + write_len - 1).to_raw();
+                (last - first + 1) as usize
+            };
+            let bio_segment = BioSegment::alloc_inner(
+                num_blocks,
+                offset % BLOCK_SIZE,
+                write_len,
+                BioDirection::ToDevice,
+            );
+            bio_segment.write(0, &mut VmReader::from(buf).to_fallible())?;
+            Bio::new(
+                BioType::Write,
+                Sid::from_offset(offset),
+                vec![bio_segment],
+                Some(complete_fn),
+            )
+        };
+
+        let mut io_batch = IoBatch::with_capacity(1);
+        bio.submit(self, &mut io_batch)?;
+        Ok(())
+    }
+
     /// Asynchronously writes consecutive bytes of several sectors in size.
     pub fn write_bytes_async(
         &self,

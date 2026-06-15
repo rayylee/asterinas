@@ -11,7 +11,7 @@ use crate::{
     device::{Device, DeviceType, DevtmpfsInodeMeta, add_node},
     events::IoEvents,
     fs::{
-        file::{PerOpenFileOps, StatusFlags},
+        file::{FileLike, InodeHandle, PerOpenFileOps, StatusFlags},
         vfs::{inode::FileOps, path::PathResolver},
     },
     prelude::*,
@@ -63,6 +63,17 @@ pub(super) fn init_in_first_process(path_resolver: &PathResolver) -> Result<()> 
     }
 
     Ok(())
+}
+
+pub(crate) fn block_device_from_file(file: &dyn FileLike) -> Result<Option<Arc<dyn BlockDevice>>> {
+    let Some(inode_handle) = file.downcast_ref::<InodeHandle>() else {
+        return Ok(None);
+    };
+    let Some(open_file) = inode_handle.downcast_open_file::<OpenBlockFile>()? else {
+        return Ok(None);
+    };
+
+    Ok(Some(open_file.block_device()))
 }
 
 mod ioctl_defs {
@@ -127,6 +138,12 @@ impl Device for BlockFile {
 // `PerOpenFileOps` trait. It leads to redundant vtable dispatch and heap allocation. We should
 // devise a better strategy to eliminate the unnecessary intermediate `Box`.
 struct OpenBlockFile(Arc<dyn BlockDevice>);
+
+impl OpenBlockFile {
+    fn block_device(&self) -> Arc<dyn BlockDevice> {
+        self.0.clone()
+    }
+}
 
 impl FileOps for OpenBlockFile {
     fn read_at(

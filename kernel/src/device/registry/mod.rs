@@ -11,6 +11,8 @@ use crate::{
 mod block;
 pub(super) mod char;
 
+pub(crate) use block::block_device_from_file;
+
 pub(super) fn init_in_first_kthread() {
     block::init_in_first_kthread();
 }

@@ -3,16 +3,21 @@
 use core::{
     mem,
     ops::Range,
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::atomic::{AtomicI64, AtomicUsize, Ordering},
     time::Duration,
 };
 
-use ostd::sync::WaitQueue;
+use aster_block::{
+    BlockDevice,
+    bio::{BioCompleteFn, BioSegment, BioStatus, is_sector_aligned},
+};
+use ostd::{mm::io::util::HasVmReaderWriter, sync::WaitQueue};
 
 use crate::{
+    device,
     fs::{self, file::FileLike},
     prelude::*,
-    thread::work_queue::{self, WorkPriority},
+    thread::work_queue::{self, WorkPriority, work_item::WorkItem},
     vm::{perms::VmPerms, vmar::Vmar},
 };
 
@@ -20,6 +25,7 @@ const AIO_RING_MAGIC: u32 = 0xa10a10a1;
 const AIO_RING_COMPAT_FEATURES: u32 = 1;
 const AIO_RING_INCOMPAT_FEATURES: u32 = 0;
 const AIO_MAX_EVENTS: usize = 65_536;
+const AIO_BLOCK_RESULT_PENDING: i64 = i64::MIN;
 
 static AIO_NR_EVENTS: AtomicUsize = AtomicUsize::new(0);
 
@@ -191,8 +197,13 @@ impl AioContext {
         Ok(())
     }
 
-    /// Submits a request to the global workqueue.
+    /// Submits a request.
     pub(crate) fn submit(self: &Arc<Self>, request: AioRequest) {
+        let request = match request.try_submit_native(self) {
+            NativeAioSubmission::Submitted => return,
+            NativeAioSubmission::Fallback(request) => request,
+        };
+
         let context = self.clone();
         work_queue::submit_work_func(
             move || {
@@ -483,6 +494,38 @@ pub(crate) struct AioEvent {
     pub(crate) res2: i64,
 }
 
+enum NativeAioSubmission {
+    Submitted,
+    Fallback(AioRequest),
+}
+
+enum NativeBlockOperation {
+    Read { offset: usize, len: usize },
+    Write { offset: usize, len: usize },
+}
+
+struct BlockAioResult {
+    res: AtomicI64,
+}
+
+impl BlockAioResult {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            res: AtomicI64::new(AIO_BLOCK_RESULT_PENDING),
+        })
+    }
+
+    fn complete(&self, res: i64) {
+        self.res.store(res, Ordering::Release);
+    }
+
+    fn res(&self) -> i64 {
+        let res = self.res.load(Ordering::Acquire);
+        debug_assert_ne!(res, AIO_BLOCK_RESULT_PENDING);
+        res
+    }
+}
+
 /// A submitted native AIO request.
 pub(crate) struct AioRequest {
     file: Option<Arc<dyn FileLike>>,
@@ -515,10 +558,18 @@ impl AioRequest {
 
     fn finish(&self, context: &AioContext) {
         let result = self.operation.execute(self.file.as_ref(), &self.vmar);
+        self.complete_with_result(context, result);
+    }
+
+    fn complete_with_result(&self, context: &AioContext, result: Result<usize>) {
+        self.complete_with_res(context, result_to_event_res(result));
+    }
+
+    fn complete_with_res(&self, context: &AioContext, res: i64) {
         let event = AioEvent {
             data: self.data,
             obj: self.obj,
-            res: result_to_event_res(result),
+            res,
             res2: 0,
         };
 
@@ -528,6 +579,278 @@ impl AioRequest {
             notifier.notify();
         }
     }
+
+    fn try_submit_native(self, context: &Arc<AioContext>) -> NativeAioSubmission {
+        let Some(file) = self.file.as_ref() else {
+            return NativeAioSubmission::Fallback(self);
+        };
+
+        let block_device = match device::block_device_from_file(file.as_ref()) {
+            Ok(Some(block_device)) => block_device,
+            Ok(None) => return NativeAioSubmission::Fallback(self),
+            Err(err) => {
+                self.complete_with_result(context, Err(err));
+                return NativeAioSubmission::Submitted;
+            }
+        };
+
+        let native_op = match &self.operation {
+            AioOperation::Read {
+                total_len, offset, ..
+            } => NativeBlockOperation::Read {
+                len: *total_len,
+                offset: *offset,
+            },
+            AioOperation::Write { data, offset } => NativeBlockOperation::Write {
+                len: data.len(),
+                offset: *offset,
+            },
+            _ => return NativeAioSubmission::Fallback(self),
+        };
+
+        match native_op {
+            NativeBlockOperation::Read { len, offset } => {
+                self.submit_block_read(context, block_device, offset, len);
+            }
+            NativeBlockOperation::Write { len, offset } => {
+                self.submit_block_write(context, block_device, offset, len);
+            }
+        }
+
+        NativeAioSubmission::Submitted
+    }
+
+    fn submit_block_read(
+        self,
+        context: &Arc<AioContext>,
+        block_device: Arc<dyn BlockDevice>,
+        offset: usize,
+        len: usize,
+    ) {
+        let Some(file) = self.file.as_ref() else {
+            self.complete_with_result(
+                context,
+                Err(Error::with_message(
+                    Errno::EINVAL,
+                    "AIO block read requires a file",
+                )),
+            );
+            return;
+        };
+        if !file.access_mode().is_readable() {
+            self.complete_with_result(
+                context,
+                Err(Error::with_message(
+                    Errno::EBADF,
+                    "the file is not opened readable",
+                )),
+            );
+            return;
+        }
+        if len == 0 {
+            self.complete_with_result(context, Ok(0));
+            return;
+        }
+        if !is_sector_aligned(offset) || !is_sector_aligned(len) {
+            self.complete_with_result(context, Err(Error::new(Errno::EINVAL)));
+            return;
+        }
+
+        let context = context.clone();
+        let result = BlockAioResult::new();
+        let mut completion_work_item = None;
+        let submit_result = block_device.read_bytes_async_with(offset, len, |segment| {
+            let work_item = self.new_block_read_work_item(context, result.clone(), segment);
+            completion_work_item = Some(work_item.clone());
+            block_complete_fn(result.clone(), work_item, len)
+        });
+        if let Err(err) = submit_result
+            && let Some(work_item) = completion_work_item
+        {
+            result.complete(result_to_event_res(Err(Error::from(err))));
+            let _ = work_queue::submit_work_item(work_item, WorkPriority::Normal);
+        }
+    }
+
+    fn submit_block_write(
+        self,
+        context: &Arc<AioContext>,
+        block_device: Arc<dyn BlockDevice>,
+        offset: usize,
+        len: usize,
+    ) {
+        let Some(file) = self.file.as_ref() else {
+            self.complete_with_result(
+                context,
+                Err(Error::with_message(
+                    Errno::EINVAL,
+                    "AIO block write requires a file",
+                )),
+            );
+            return;
+        };
+        if !file.access_mode().is_writable() {
+            self.complete_with_result(
+                context,
+                Err(Error::with_message(
+                    Errno::EBADF,
+                    "the file is not opened writable",
+                )),
+            );
+            return;
+        }
+        if len == 0 {
+            self.complete_with_result(context, Ok(0));
+            return;
+        }
+        if !is_sector_aligned(offset) || !is_sector_aligned(len) {
+            self.complete_with_result(context, Err(Error::new(Errno::EINVAL)));
+            return;
+        }
+
+        let AioRequest {
+            file,
+            vmar,
+            data: aio_data,
+            obj,
+            operation,
+            notifier,
+        } = self;
+        let AioOperation::Write { data, .. } = operation else {
+            unreachable!("the caller validated that this is a write operation");
+        };
+        let completion = AioRequestCompletion {
+            file,
+            vmar,
+            data: aio_data,
+            obj,
+            notifier,
+        };
+        let context = context.clone();
+        let result = BlockAioResult::new();
+        let work_item = completion.new_block_write_work_item(context, result.clone());
+        let complete_fn = block_complete_fn(result.clone(), work_item.clone(), len);
+        let submit_result = block_device.write_bytes_async_with(offset, &data, complete_fn);
+        if let Err(err) = submit_result {
+            result.complete(result_to_event_res(Err(Error::from(err))));
+            let _ = work_queue::submit_work_item(work_item, WorkPriority::Normal);
+        }
+    }
+
+    fn new_block_read_work_item(
+        self,
+        context: Arc<AioContext>,
+        result: Arc<BlockAioResult>,
+        segment: BioSegment,
+    ) -> Arc<WorkItem> {
+        WorkItem::new(Box::new(move || {
+            let res = self.block_read_result_res(result.res(), &segment);
+            if res > 0
+                && let Some(file) = self.file.as_ref()
+            {
+                fs::vfs::notify::on_access(file);
+            }
+            self.complete_with_res(&context, res);
+        }))
+    }
+
+    fn block_read_result_res(&self, res: i64, segment: &BioSegment) -> i64 {
+        if res < 0 {
+            return res;
+        }
+
+        let len = res as usize;
+        let result = match &self.operation {
+            AioOperation::Read { buffers, .. } => {
+                copy_block_read_result(&self.vmar, buffers, len, segment)
+            }
+            _ => Err(Error::with_message(
+                Errno::EINVAL,
+                "AIO block read completed for a non-read operation",
+            )),
+        };
+
+        match result {
+            Ok(()) => res,
+            Err(err) => result_to_event_res(Err(err)),
+        }
+    }
+}
+
+struct AioRequestCompletion {
+    file: Option<Arc<dyn FileLike>>,
+    vmar: Arc<Vmar>,
+    data: u64,
+    obj: u64,
+    notifier: Option<Arc<dyn AioNotifier>>,
+}
+
+impl AioRequestCompletion {
+    fn complete_with_res(&self, context: &AioContext, res: i64) {
+        let event = AioEvent {
+            data: self.data,
+            obj: self.obj,
+            res,
+            res2: 0,
+        };
+
+        if context.complete(&self.vmar, event)
+            && let Some(notifier) = self.notifier.as_ref()
+        {
+            notifier.notify();
+        }
+    }
+
+    fn new_block_write_work_item(
+        self,
+        context: Arc<AioContext>,
+        result: Arc<BlockAioResult>,
+    ) -> Arc<WorkItem> {
+        WorkItem::new(Box::new(move || {
+            let res = result.res();
+            if res > 0
+                && let Some(file) = self.file.as_ref()
+            {
+                fs::vfs::notify::on_modify(file);
+            }
+            self.complete_with_res(&context, res);
+        }))
+    }
+}
+
+fn block_complete_fn(
+    result: Arc<BlockAioResult>,
+    work_item: Arc<WorkItem>,
+    len: usize,
+) -> BioCompleteFn {
+    Box::new(move |status| {
+        result.complete(bio_status_to_event_res(status, len));
+        let _ = work_queue::submit_work_item(work_item, WorkPriority::Normal);
+    })
+}
+
+fn bio_status_to_event_res(status: BioStatus, len: usize) -> i64 {
+    match status {
+        BioStatus::Complete => len as i64,
+        BioStatus::NoSpace => -(Errno::ENOSPC as i32 as i64),
+        BioStatus::NotSupported | BioStatus::IoError | BioStatus::Zeros => {
+            -(Errno::EIO as i32 as i64)
+        }
+        BioStatus::Init | BioStatus::Submit => -(Errno::EIO as i32 as i64),
+    }
+}
+
+fn copy_block_read_result(
+    vmar: &Vmar,
+    buffers: &[AioIoVec],
+    len: usize,
+    segment: &BioSegment,
+) -> Result<()> {
+    let mut data = alloc_zeroed_vec(len)?;
+    let mut writer = VmWriter::from(data.as_mut_slice()).to_fallible();
+    let mut reader = segment.reader()?;
+    reader.read_fallible(&mut writer)?;
+    write_user_buffers(vmar, buffers, &data)
 }
 
 /// A native AIO operation.
