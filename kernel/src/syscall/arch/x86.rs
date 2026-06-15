@@ -62,6 +62,7 @@ use super::{
     getxattr::{sys_fgetxattr, sys_getxattr, sys_lgetxattr},
     impl_syscall_nums_and_dispatch_fn,
     inotify::{sys_inotify_add_watch, sys_inotify_init, sys_inotify_init1, sys_inotify_rm_watch},
+    aio::{sys_io_cancel, sys_io_destroy, sys_io_getevents, sys_io_setup, sys_io_submit},
     ioctl::sys_ioctl,
     kill::sys_kill,
     link::{sys_link, sys_linkat},
@@ -343,6 +344,11 @@ impl_syscall_nums_and_dispatch_fn! {
     SYS_FUTEX = 202            => sys_futex(args[..6]);
     SYS_SCHED_SETAFFINITY = 203 => sys_sched_setaffinity(args[..3]);
     SYS_SCHED_GETAFFINITY = 204 => sys_sched_getaffinity(args[..3]);
+    SYS_IO_SETUP = 206          => sys_io_setup(args[..2]);
+    SYS_IO_DESTROY = 207        => sys_io_destroy(args[..1]);
+    SYS_IO_GETEVENTS = 208      => sys_io_getevents(args[..5]);
+    SYS_IO_SUBMIT = 209         => sys_io_submit(args[..3]);
+    SYS_IO_CANCEL = 210         => sys_io_cancel(args[..3]);
     SYS_EPOLL_CREATE = 213     => sys_epoll_create(args[..1]);
     SYS_GETDENTS64 = 217       => sys_getdents64(args[..3]);
     SYS_SET_TID_ADDRESS = 218  => sys_set_tid_address(args[..1]);

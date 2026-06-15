@@ -27,6 +27,7 @@ use crate::{
     prelude::*,
     process::{
         UserNamespace, WaitOptions,
+        aio::AioContext,
         signal::{Pollee, sig_queues::SigQueues},
         status::StopWaitStatus,
     },
@@ -154,6 +155,10 @@ pub struct Process {
     // Namespaces
     /// The user namespace
     user_ns: Mutex<Arc<UserNamespace>>,
+
+    // AIO
+    /// Per-process AIO context table: ring_va → AioContext
+    aio_table: Mutex<BTreeMap<u64, Arc<AioContext>>>,
 }
 
 impl Drop for Process {
@@ -266,6 +271,7 @@ impl Process {
             prof_clock,
             start_time: Jiffies::elapsed(),
             user_ns: Mutex::new(user_ns),
+            aio_table: Mutex::new(BTreeMap::new()),
         })
     }
 
@@ -782,6 +788,11 @@ impl Process {
 
     pub fn user_ns(&self) -> &Mutex<Arc<UserNamespace>> {
         &self.user_ns
+    }
+
+    /// Returns the per-process AIO context table.
+    pub fn aio_table(&self) -> &Mutex<BTreeMap<u64, Arc<AioContext>>> {
+        &self.aio_table
     }
 
     // ******************* cgroup ********************
