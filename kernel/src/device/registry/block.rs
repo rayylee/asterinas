@@ -8,7 +8,7 @@ use ostd::mm::VmIo;
 
 use crate::{
     context::current_userspace,
-    device::{Device, DeviceType, DevtmpfsInodeMeta, add_node},
+    device::{Device, DeviceType, DevtmpfsInodeMeta, add_node, loopdev::LoopDevice},
     events::IoEvents,
     fs::{
         file::{PerOpenFileOps, StatusFlags},
@@ -189,6 +189,16 @@ impl FileOps for OpenBlockFile {
     }
 }
 
+impl OpenBlockFile {
+    fn device_size(&self) -> Result<usize> {
+        self.0
+            .metadata()
+            .nr_sectors
+            .checked_mul(SECTOR_SIZE)
+            .ok_or_else(|| Error::with_message(Errno::EOVERFLOW, "block device size overflows"))
+    }
+}
+
 impl Pollable for OpenBlockFile {
     fn poll(&self, mask: IoEvents, _: Option<&mut PollHandle>) -> IoEvents {
         let events = IoEvents::IN | IoEvents::OUT;
@@ -205,7 +215,17 @@ impl PerOpenFileOps for OpenBlockFile {
         true
     }
 
+    fn seek_end(&self) -> Result<Option<usize>> {
+        Ok(Some(self.device_size()?))
+    }
+
     fn ioctl(&self, raw_ioctl: RawIoctl) -> Result<i32> {
+        if let Some(loop_device) = self.0.downcast_ref::<LoopDevice>()
+            && let Some(result) = loop_device.ioctl(raw_ioctl)
+        {
+            return result;
+        }
+
         use ioctl_defs::*;
 
         dispatch_ioctl!(match raw_ioctl {
