@@ -2,6 +2,7 @@
 
 mod evdev;
 mod fb;
+mod loopdev;
 mod mem;
 pub mod misc;
 mod pty;
@@ -187,6 +188,7 @@ pub fn init_in_first_process(ctx: &Context) -> Result<()> {
     tty::init_in_first_process()?;
     pty::init_in_first_process(&path_resolver, ctx)?;
     shm::init_in_first_process(&path_resolver, ctx)?;
+    loopdev::init_in_first_process();
     registry::init_in_first_process(&path_resolver)?;
 
     Ok(())

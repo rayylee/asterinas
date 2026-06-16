@@ -18,5 +18,6 @@ set -e
 ./framebuffer
 ./full
 ./hwrng
+./loopdev
 ./nvme
 ./random
