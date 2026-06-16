@@ -8,7 +8,7 @@ use ostd::mm::VmIo;
 
 use crate::{
     context::current_userspace,
-    device::{Device, DeviceType, DevtmpfsInodeMeta, add_node},
+    device::{Device, DeviceType, DevtmpfsInodeMeta, add_node, loopdev::LoopDevice},
     events::IoEvents,
     fs::{
         file::{PerOpenFileOps, StatusFlags},
@@ -210,6 +210,12 @@ impl PerOpenFileOps for OpenBlockFile {
     }
 
     fn ioctl(&self, raw_ioctl: RawIoctl) -> Result<i32> {
+        if let Some(loop_device) = self.0.downcast_ref::<LoopDevice>()
+            && let Some(result) = loop_device.ioctl(raw_ioctl)
+        {
+            return result;
+        }
+
         use ioctl_defs::*;
 
         dispatch_ioctl!(match raw_ioctl {
