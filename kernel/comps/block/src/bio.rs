@@ -52,7 +52,7 @@ impl Bio {
     /// The `start_sid` is the starting sector id on the device.
     /// The `segments` describes the memory segments.
     /// The `complete_fn` is the optional callback function that will be invoked
-    /// when the I/O is completed, receiving the final `BioStatus`.
+    /// when the I/O is completed, returning the final `BioStatus`.
     pub fn new(
         type_: BioType,
         start_sid: Sid,
@@ -75,6 +75,67 @@ impl Bio {
             complete_fn,
             segments,
         }
+    }
+
+    /// Constructs a new `Bio` for special operations that do not require data buffers,
+    /// such as `WriteZeroes` and `Discard`.
+    ///
+    /// The `typ` must be one of `BioType::WriteZeroes` or `BioType::Discard`.
+    /// The `start_sid` is the starting sector id and `nsectors` is the number
+    /// of sectors to operate on the device.
+    /// The `complete_fn` is the optional callback function that will be invoked
+    /// when the I/O is completed, returning the final `BioStatus`.
+    fn new_special(
+        typ: BioType,
+        start_sid: Sid,
+        nsectors: u64,
+        complete_fn: Option<BioCompleteFn>,
+    ) -> Self {
+        assert!(
+            matches!(typ, BioType::WriteZeroes | BioType::Discard),
+            "new_special only supports WriteZeroes and Discard"
+        );
+
+        let metadata = Arc::new(BioMetadata {
+            type_: typ,
+            sid_range: start_sid..start_sid + nsectors,
+            status: AtomicU32::new(BioStatus::Init as u32),
+            wait_queue: WaitQueue::new(),
+        });
+
+        Self {
+            metadata,
+            complete_fn,
+            segments: Vec::new(),
+        }
+    }
+
+    /// Constructs a new `Bio` for a write-zeroes operation.
+    ///
+    /// The `start_sid` is the starting sector id and `nsectors` is the number
+    /// of sectors to zero on the device.
+    /// The `complete_fn` is the optional callback function that will be invoked
+    /// when the I/O is completed, returning the final `BioStatus`.
+    pub fn new_zeroe_write(
+        start_sid: Sid,
+        nsectors: u64,
+        complete_fn: Option<BioCompleteFn>,
+    ) -> Self {
+        Self::new_special(BioType::WriteZeroes, start_sid, nsectors, complete_fn)
+    }
+
+    /// Constructs a new `Bio` for a discard operation.
+    ///
+    /// The `start_sid` is the starting sector id and `nsectors` is the number
+    /// of sectors to discard on the device.
+    /// The `complete_fn` is the optional callback function that will be invoked
+    /// when the I/O is completed, returning the final `BioStatus`.
+    pub fn new_discard(
+        start_sid: Sid,
+        nsectors: u64,
+        complete_fn: Option<BioCompleteFn>,
+    ) -> Self {
+        Self::new_special(BioType::Discard, start_sid, nsectors, complete_fn)
     }
 
     /// Returns the type.
@@ -340,7 +401,10 @@ pub enum BioType {
     Write = 1,
     /// Flush the volatile write cache.
     Flush = 2,
-    // TODO: Add support for other BIO types, such as discarding sectors.
+    /// Write zeroes to sectors on the device.
+    WriteZeroes = 3,
+    /// Discard (deallocate) sectors on the device.
+    Discard = 4,
 }
 
 /// The status of `Bio`.

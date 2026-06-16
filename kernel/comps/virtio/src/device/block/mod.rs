@@ -35,8 +35,7 @@ bitflags! {
 
 impl BlockFeatures {
     pub(super) fn supported_features() -> Self {
-        // Can be added gradually later: CONFIG_WCE, CONFIG_UNMAP, etc.
-        BlockFeatures::FLUSH | BlockFeatures::BLK_SIZE
+        BlockFeatures::FLUSH | BlockFeatures::BLK_SIZE | BlockFeatures::WRITE_ZEROES | BlockFeatures::DISCARD
     }
 
     pub(super) fn negotiate_features(device_features: u64) -> Self {
@@ -127,6 +126,16 @@ struct VirtioBlockTopology {
     opt_io_size: u32,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod)]
+pub(super) struct VirtioBlkDiscardWriteZeroes {
+    sector: u64,
+    num_sectors: u32,
+    flags: u32,
+}
+
+pub(super) const DZW_SIZE: usize = size_of::<VirtioBlkDiscardWriteZeroes>();
+
 impl VirtioBlockConfig {
     pub(self) fn new_manager(transport: &dyn VirtioTransport) -> ConfigManager<Self> {
         let safe_ptr = transport
@@ -180,7 +189,24 @@ impl ConfigManager<VirtioBlockConfig> {
             .unwrap();
 
         if self.is_modern() {
-            // TODO: read more field if modern interface exists.
+            blk_config.max_discard_sectors = self
+                .read_once::<u32>(offset_of!(VirtioBlockConfig, max_discard_sectors))
+                .unwrap();
+            blk_config.max_discard_seg = self
+                .read_once::<u32>(offset_of!(VirtioBlockConfig, max_discard_seg))
+                .unwrap();
+            blk_config.discard_sector_alignment = self
+                .read_once::<u32>(offset_of!(VirtioBlockConfig, discard_sector_alignment))
+                .unwrap();
+            blk_config.max_write_zeroes_sectors = self
+                .read_once::<u32>(offset_of!(VirtioBlockConfig, max_write_zeroes_sectors))
+                .unwrap();
+            blk_config.max_write_zeroes_seg = self
+                .read_once::<u32>(offset_of!(VirtioBlockConfig, max_write_zeroes_seg))
+                .unwrap();
+            blk_config.write_zeros_may_unmap = self
+                .read_once::<u8>(offset_of!(VirtioBlockConfig, write_zeros_may_unmap))
+                .unwrap();
         }
 
         blk_config

@@ -4,7 +4,7 @@ use io_util::batch::IoBatch;
 use ostd::mm::{VmIo, VmReader, VmWriter};
 
 use super::{
-    BLOCK_SIZE, BlockDevice,
+    BLOCK_SIZE, SECTOR_SIZE, BlockDevice,
     bio::{Bio, BioCompleteFn, BioEnqueueError, BioSegment, BioStatus, BioType},
     id::{Bid, Sid},
 };
@@ -78,6 +78,56 @@ impl dyn BlockDevice {
         let bio = Bio::new(BioType::Flush, Sid::from(Bid::from_offset(0)), vec![], None);
         let status = bio.submit_and_wait(self)?;
         Ok(status)
+    }
+
+    /// Synchronously writes zeroes to contiguous blocks starting from the `start_bid`.
+    pub fn write_zeroes(
+        &self,
+        start_bid: Bid,
+        nblocks: usize,
+    ) -> Result<BioStatus, BioEnqueueError> {
+        let nsectors = (nblocks as u64) * (BLOCK_SIZE as u64 / SECTOR_SIZE as u64);
+        let bio = Bio::new_zeroe_write(Sid::from(start_bid), nsectors, None);
+        let status = bio.submit_and_wait(self)?;
+        Ok(status)
+    }
+
+    /// Asynchronously writes zeroes to contiguous blocks starting from the `start_bid`.
+    pub fn write_zeroes_async(
+        &self,
+        start_bid: Bid,
+        nblocks: usize,
+        complete_fn: Option<BioCompleteFn>,
+        io_batch: &mut IoBatch,
+    ) -> Result<(), BioEnqueueError> {
+        let nsectors = (nblocks as u64) * (BLOCK_SIZE as u64 / SECTOR_SIZE as u64);
+        let bio = Bio::new_zeroe_write(Sid::from(start_bid), nsectors, complete_fn);
+        bio.submit(self, io_batch)
+    }
+
+    /// Synchronously discards contiguous blocks starting from the `start_bid`.
+    pub fn discard_blocks(
+        &self,
+        start_bid: Bid,
+        nblocks: usize,
+    ) -> Result<BioStatus, BioEnqueueError> {
+        let nsectors = (nblocks as u64) * (BLOCK_SIZE as u64 / SECTOR_SIZE as u64);
+        let bio = Bio::new_discard(Sid::from(start_bid), nsectors, None);
+        let status = bio.submit_and_wait(self)?;
+        Ok(status)
+    }
+
+    /// Asynchronously discards contiguous blocks starting from the `start_bid`.
+    pub fn discard_blocks_async(
+        &self,
+        start_bid: Bid,
+        nblocks: usize,
+        complete_fn: Option<BioCompleteFn>,
+        io_batch: &mut IoBatch,
+    ) -> Result<(), BioEnqueueError> {
+        let nsectors = (nblocks as u64) * (BLOCK_SIZE as u64 / SECTOR_SIZE as u64);
+        let bio = Bio::new_discard(Sid::from(start_bid), nsectors, complete_fn);
+        bio.submit(self, io_batch)
     }
 }
 

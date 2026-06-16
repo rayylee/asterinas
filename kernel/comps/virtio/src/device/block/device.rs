@@ -27,7 +27,7 @@ use ostd::{
     sync::SpinLock,
 };
 
-use super::{BlockFeatures, VirtioBlockConfig};
+use super::{BlockFeatures, VirtioBlockConfig, VirtioBlkDiscardWriteZeroes, DZW_SIZE};
 use crate::{
     VIRTIO_BLOCK_MAJOR_ID,
     device::{
@@ -120,6 +120,8 @@ impl BlockDevice {
             BioType::Read => self.device.read(request),
             BioType::Write => self.device.write(request),
             BioType::Flush => self.device.flush(request),
+            BioType::WriteZeroes => self.device.write_zeroes(request),
+            BioType::Discard => self.device.discard(request),
         }
     }
 
@@ -202,6 +204,7 @@ struct DeviceInner {
     transport: SpinLock<Box<dyn VirtioTransport>>,
     block_requests: Arc<DmaStream>,
     block_responses: Arc<DmaStream>,
+    block_dzw: Arc<DmaStream>,
     id_allocator: SyncIdAlloc,
     submitted_requests: SpinLock<BTreeMap<u16, SubmittedRequest>>,
 }
@@ -248,9 +251,12 @@ impl DeviceInner {
             Arc::new(DmaStream::alloc(1, false).map_err(VirtioDeviceError::ResourceAlloc)?);
         let block_responses =
             Arc::new(DmaStream::alloc(1, false).map_err(VirtioDeviceError::ResourceAlloc)?);
+        let block_dzw =
+            Arc::new(DmaStream::alloc(1, false).map_err(VirtioDeviceError::ResourceAlloc)?);
         const {
             assert!(Self::QUEUE_SIZE as usize * REQ_SIZE <= PAGE_SIZE);
             assert!(Self::QUEUE_SIZE as usize * RESP_SIZE <= PAGE_SIZE);
+            assert!(Self::QUEUE_SIZE as usize * DZW_SIZE <= PAGE_SIZE);
         }
 
         let device = Arc::new(Self {
@@ -260,6 +266,7 @@ impl DeviceInner {
             transport: SpinLock::new(transport),
             block_requests,
             block_responses,
+            block_dzw,
             id_allocator: SyncIdAlloc::with_capacity(Self::QUEUE_SIZE as usize),
             submitted_requests: SpinLock::new(BTreeMap::new()),
         });
@@ -468,6 +475,152 @@ impl DeviceInner {
             }
 
             // Records the submitted request
+            let submitted_request = SubmittedRequest::new(id as u16, bio_request);
+            self.submitted_requests
+                .disable_irq()
+                .lock()
+                .insert(token, submitted_request);
+            return;
+        }
+    }
+
+    /// Writes zeroes to sectors on the device.
+    fn write_zeroes(&self, bio_request: BioRequest) {
+        if !self.features.contains(BlockFeatures::WRITE_ZEROES) {
+            bio_request.into_bios().for_each(|bio| {
+                bio.complete(BioStatus::NotSupported);
+            });
+            return;
+        }
+
+        let id = self.id_allocator.alloc();
+
+        let req_slice = {
+            let req_slice = Slice::new(
+                self.block_requests.clone(),
+                id * REQ_SIZE..(id + 1) * REQ_SIZE,
+            );
+            let req = BlockReq {
+                type_: ReqType::WriteZeroes as _,
+                reserved: 0,
+                sector: 0,
+            };
+            req_slice.write_val(0, &req).unwrap();
+            req_slice.sync_to_device().unwrap();
+            req_slice
+        };
+
+        let dzw_slice = {
+            let dzw_slice = Slice::new(
+                self.block_dzw.clone(),
+                id * DZW_SIZE..(id + 1) * DZW_SIZE,
+            );
+            let dzw = VirtioBlkDiscardWriteZeroes {
+                sector: bio_request.sid_range().start.to_raw(),
+                num_sectors: bio_request.num_sectors() as u32,
+                flags: 0,
+            };
+            dzw_slice.write_val(0, &dzw).unwrap();
+            dzw_slice.sync_to_device().unwrap();
+            dzw_slice
+        };
+
+        let resp_slice = {
+            let resp_slice = Slice::new(
+                self.block_responses.clone(),
+                id * RESP_SIZE..(id + 1) * RESP_SIZE,
+            );
+            resp_slice.write_val(0, &BlockResp::default()).unwrap();
+            resp_slice.sync_to_device().unwrap();
+            resp_slice
+        };
+
+        let num_used_descs = 3;
+        loop {
+            let mut queue = self.queue.disable_irq().lock();
+            if num_used_descs > queue.available_desc() {
+                continue;
+            }
+            let token = queue
+                .add_dma_bufs(&[&req_slice, &dzw_slice], &[&resp_slice])
+                .expect("add queue failed");
+            if queue.should_notify() {
+                queue.notify();
+            }
+
+            let submitted_request = SubmittedRequest::new(id as u16, bio_request);
+            self.submitted_requests
+                .disable_irq()
+                .lock()
+                .insert(token, submitted_request);
+            return;
+        }
+    }
+
+    /// Discards (deallocates) sectors on the device.
+    fn discard(&self, bio_request: BioRequest) {
+        if !self.features.contains(BlockFeatures::DISCARD) {
+            bio_request.into_bios().for_each(|bio| {
+                bio.complete(BioStatus::NotSupported);
+            });
+            return;
+        }
+
+        let id = self.id_allocator.alloc();
+
+        let req_slice = {
+            let req_slice = Slice::new(
+                self.block_requests.clone(),
+                id * REQ_SIZE..(id + 1) * REQ_SIZE,
+            );
+            let req = BlockReq {
+                type_: ReqType::Discard as _,
+                reserved: 0,
+                sector: 0,
+            };
+            req_slice.write_val(0, &req).unwrap();
+            req_slice.sync_to_device().unwrap();
+            req_slice
+        };
+
+        let dzw_slice = {
+            let dzw_slice = Slice::new(
+                self.block_dzw.clone(),
+                id * DZW_SIZE..(id + 1) * DZW_SIZE,
+            );
+            let dzw = VirtioBlkDiscardWriteZeroes {
+                sector: bio_request.sid_range().start.to_raw(),
+                num_sectors: bio_request.num_sectors() as u32,
+                flags: 0,
+            };
+            dzw_slice.write_val(0, &dzw).unwrap();
+            dzw_slice.sync_to_device().unwrap();
+            dzw_slice
+        };
+
+        let resp_slice = {
+            let resp_slice = Slice::new(
+                self.block_responses.clone(),
+                id * RESP_SIZE..(id + 1) * RESP_SIZE,
+            );
+            resp_slice.write_val(0, &BlockResp::default()).unwrap();
+            resp_slice.sync_to_device().unwrap();
+            resp_slice
+        };
+
+        let num_used_descs = 3;
+        loop {
+            let mut queue = self.queue.disable_irq().lock();
+            if num_used_descs > queue.available_desc() {
+                continue;
+            }
+            let token = queue
+                .add_dma_bufs(&[&req_slice, &dzw_slice], &[&resp_slice])
+                .expect("add queue failed");
+            if queue.should_notify() {
+                queue.notify();
+            }
+
             let submitted_request = SubmittedRequest::new(id as u16, bio_request);
             self.submitted_requests
                 .disable_irq()
