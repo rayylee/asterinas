@@ -3,9 +3,8 @@
 //! NVMe Block Device implementation.
 //!
 //! Implements the [`aster_block::BlockDevice`] trait on top of the NVMe transport.
-//! BIOs are staged in [`BioRequestSingleQueue`] and drained by repeated calls to
-//! [`NvmeBlockDevice::handle_requests`] from the kernel registry's per-device
-//! kthread (see `kernel/src/device/registry/block.rs`). Reads, writes, and flushes
+//! BIOs are enqueued to the [`BlockIoDispatcher`] and drained by its dedicated
+//! kernel thread. Reads, writes, and flushes
 //! issue synchronously to I/O queue [`IO_QID`] and wait on a per-queue `WaitQueue` driven
 //! by the MSI-X completion interrupt.
 //!
@@ -23,7 +22,8 @@ use core::{
 use aster_block::{
     BlockDeviceMeta, SECTOR_SIZE,
     bio::{BioEnqueueError, BioStatus, BioType, SubmittedBio, bio_segment_pool_init},
-    request_queue::{BioRequest, BioRequestSingleQueue},
+    dispatcher::{BlockIoDispatcher, BlockRequestHandler},
+    request_queue::BioRequest,
 };
 use aster_util::safe_ptr::SafePtr;
 use device_id::DeviceId;
@@ -60,15 +60,15 @@ ostd::const_assert!(IO_QID + 1 == QUEUE_NUM);
 
 #[derive(Debug)]
 pub struct NvmeBlockDevice {
-    device: NvmeDeviceInner,
-    queue: BioRequestSingleQueue,
+    device: Arc<NvmeDeviceInner>,
+    dispatcher: Arc<BlockIoDispatcher>,
     name: String,
     id: DeviceId,
 }
 
 impl aster_block::BlockDevice for NvmeBlockDevice {
     fn enqueue(&self, bio: SubmittedBio) -> Result<(), BioEnqueueError> {
-        self.queue.enqueue(bio)
+        self.dispatcher.enqueue(bio)
     }
 
     fn metadata(&self) -> BlockDeviceMeta {
@@ -76,7 +76,7 @@ impl aster_block::BlockDevice for NvmeBlockDevice {
         let sectors = self.device.namespace.nsze;
 
         BlockDeviceMeta {
-            max_nr_segments_per_bio: self.queue.max_nr_segments_per_bio(),
+            max_nr_segments_per_bio: self.dispatcher.max_nr_segments(),
             nr_sectors: sectors as usize,
         }
     }
@@ -95,6 +95,7 @@ static NR_NVME_DEVICE: AtomicU32 = AtomicU32::new(0);
 impl NvmeBlockDevice {
     pub(crate) fn init(transport: NvmePciTransport) -> Result<(), NvmeDeviceError> {
         let (device, io_msix_vectors) = NvmeDeviceInner::init(transport)?;
+        let device = Arc::new(device);
 
         let index = NR_NVME_DEVICE.fetch_add(1, Ordering::Relaxed);
         let name = formatted_device_name(index, device.namespace.id);
@@ -104,34 +105,23 @@ impl NvmeBlockDevice {
             DeviceId::new(major_id, device_id::MinorId::new(index))
         };
 
+        device.setup_msix_handlers(&io_msix_vectors);
+
+        let max_nr_segments = usize::MAX;
+        let dispatcher = BlockIoDispatcher::start(device.clone(), 1, max_nr_segments);
+
         let block_device = Arc::new(Self {
             device,
-            queue: BioRequestSingleQueue::new(),
+            dispatcher,
             name,
             id,
         });
-
-        block_device
-            .device
-            .setup_msix_handlers(&block_device, io_msix_vectors);
 
         aster_block::register(block_device)
             .map_err(|_| NvmeDeviceError::BlockDeviceRegisterFailed)?;
 
         bio_segment_pool_init();
         Ok(())
-    }
-
-    /// Dequeues a `BioRequest` from the software staging queue and
-    /// processes the request.
-    pub fn handle_requests(&self) {
-        let request = self.queue.dequeue();
-        debug!("Handle Request: {:?}", request);
-        match request.type_() {
-            BioType::Read => self.device.read(request),
-            BioType::Write => self.device.write(request),
-            BioType::Flush => self.device.flush(request),
-        }
     }
 }
 
@@ -290,20 +280,16 @@ impl NvmeDeviceInner {
     }
 
     /// Registers MSI-X handlers that wake completion wait queues for admin and I/O queues.
-    fn setup_msix_handlers(
-        &self,
-        block_device: &Arc<NvmeBlockDevice>,
-        io_msix_vectors: IoMsixVectors,
-    ) {
+    fn setup_msix_handlers(self: &Arc<Self>, io_msix_vectors: &IoMsixVectors) {
         let mut transport = self.transport.lock();
         let msix_manager = transport.msix_manager_mut();
 
         // Admin queue interrupt (vector 0)
         let (_admin_vec, admin_irq) = msix_manager.admin_irq();
-        let device_weak = Arc::downgrade(block_device);
+        let device_weak = Arc::downgrade(self);
         admin_irq.on_active(move |_| {
-            if let Some(block_device) = device_weak.upgrade() {
-                block_device.device.completion_wait_queues[0].wake_all();
+            if let Some(device) = device_weak.upgrade() {
+                device.completion_wait_queues[0].wake_all();
             }
         });
 
@@ -312,10 +298,10 @@ impl NvmeDeviceInner {
             let io_irq = msix_manager
                 .irq_for_vector_mut(io_msix_vectors.0[io_qid - 1])
                 .unwrap();
-            let device_weak = Arc::downgrade(block_device);
+            let device_weak = Arc::downgrade(self);
             io_irq.on_active(move |_| {
-                if let Some(block_device) = device_weak.upgrade() {
-                    block_device.device.completion_wait_queues[io_qid].wake_all();
+                if let Some(device) = device_weak.upgrade() {
+                    device.completion_wait_queues[io_qid].wake_all();
                 }
             });
         }
@@ -628,6 +614,16 @@ impl InitContext {
     }
 }
 
+impl BlockRequestHandler for NvmeDeviceInner {
+    fn handle_request(&self, request: BioRequest, _queue_id: usize) {
+        match request.type_() {
+            BioType::Read => self.read(request),
+            BioType::Write => self.write(request),
+            BioType::Flush => self.flush(request),
+        }
+    }
+}
+
 impl NvmeDeviceInner {
     fn lock_sq(
         &self,
@@ -870,7 +866,6 @@ mod test {
             TEST_BUF_LENGTH,
             TEST_CHAR,
         );
-        nvme_block_device.handle_requests();
         write_batch.wait_all().unwrap();
 
         let mut read_batch = IoBatch::with_capacity(1);
@@ -881,7 +876,6 @@ mod test {
             TEST_BUF_LENGTH,
             TEST_CHAR,
         );
-        nvme_block_device.handle_requests();
         read_batch.wait_all().unwrap();
 
         let mut read_buf = [0u8; TEST_BUF_LENGTH];

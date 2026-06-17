@@ -41,6 +41,7 @@ macro_rules! __log_prefix {
 
 pub mod bio;
 mod device_id;
+pub mod dispatcher;
 pub mod id;
 mod impl_block_device;
 mod partition;

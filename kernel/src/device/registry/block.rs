@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use aster_block::{BLOCK_SIZE, BlockDevice, SECTOR_SIZE};
-use aster_nvme::NvmeBlockDevice;
-use aster_virtio::device::block::device::BlockDevice as VirtIoBlockDevice;
 use device_id::DeviceId;
 use ostd::mm::VmIo;
 
@@ -16,41 +14,12 @@ use crate::{
     },
     prelude::*,
     process::signal::{PollHandle, Pollable},
-    thread::kernel_thread::ThreadOptions,
     util::ioctl::{RawIoctl, dispatch_ioctl},
 };
 
 pub(super) fn init_in_first_kthread() {
-    for device in aster_block::collect_all() {
-        if device.is_partition() {
-            continue;
-        }
-
-        // Spawn threads for virtio block devices
-        if device.downcast_ref::<VirtIoBlockDevice>().is_some() {
-            let device_clone = device.clone();
-            let task_fn = move || {
-                info!("spawn the virtio-block thread");
-                let virtio_block_device = device_clone.downcast_ref::<VirtIoBlockDevice>().unwrap();
-                loop {
-                    virtio_block_device.handle_requests();
-                }
-            };
-            ThreadOptions::new(task_fn).spawn();
-        }
-        // Spawn threads for NVMe block devices
-        else if device.downcast_ref::<NvmeBlockDevice>().is_some() {
-            let device_clone = device.clone();
-            let task_fn = move || {
-                info!("spawn the nvme-block thread");
-                let nvme_block_device = device_clone.downcast_ref::<NvmeBlockDevice>().unwrap();
-                loop {
-                    nvme_block_device.handle_requests();
-                }
-            };
-            ThreadOptions::new(task_fn).spawn();
-        }
-    }
+    // Consumer kthreads are now spawned by each driver via `BlockIoDispatcher::start()`.
+    // Nothing to do here.
 }
 
 pub(super) fn init_in_first_process(path_resolver: &PathResolver) -> Result<()> {

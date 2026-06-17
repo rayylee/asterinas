@@ -16,7 +16,8 @@ use core::{
 use aster_block::{
     BlockDeviceMeta, EXTENDED_DEVICE_ID_ALLOCATOR, PartitionInfo, PartitionNode,
     bio::{BioEnqueueError, BioStatus, BioType, SubmittedBio, bio_segment_pool_init},
-    request_queue::{BioRequest, BioRequestSingleQueue},
+    dispatcher::{BlockIoDispatcher, BlockRequestHandler},
+    request_queue::BioRequest,
 };
 use aster_util::mem_obj_slice::Slice;
 use device_id::{DeviceId, MinorId};
@@ -50,8 +51,8 @@ static NR_BLOCK_DEVICE: AtomicU32 = AtomicU32::new(0);
 #[derive(Debug)]
 pub struct BlockDevice {
     device: Arc<DeviceInner>,
-    /// The software staging queue.
-    queue: BioRequestSingleQueue,
+    /// The generic block I/O dispatcher.
+    dispatcher: Arc<BlockIoDispatcher>,
     id: DeviceId,
     name: String,
     partitions: SpinLock<Option<Vec<Arc<PartitionNode>>>>,
@@ -92,13 +93,12 @@ impl BlockDevice {
         );
         let name = Self::formatted_device_name(index);
 
+        let max_nr_segments = (DeviceInner::QUEUE_SIZE - 2) as usize;
+        let dispatcher = BlockIoDispatcher::start(device.clone(), 1, max_nr_segments);
+
         let block_device = Arc::new_cyclic(|weak_self| BlockDevice {
             device,
-            // Each bio request includes an additional 1 request and 1 response descriptor,
-            // therefore this upper bound is set to (QUEUE_SIZE - 2).
-            queue: BioRequestSingleQueue::with_max_nr_segments_per_bio(
-                (DeviceInner::QUEUE_SIZE - 2) as usize,
-            ),
+            dispatcher,
             id,
             name,
             partitions: SpinLock::new(None),
@@ -111,18 +111,6 @@ impl BlockDevice {
         Ok(())
     }
 
-    /// Dequeues a `BioRequest` from the software staging queue and
-    /// processes the request.
-    pub fn handle_requests(&self) {
-        let request = self.queue.dequeue();
-        info!("Handle Request: {:?}", request);
-        match request.type_() {
-            BioType::Read => self.device.read(request),
-            BioType::Write => self.device.write(request),
-            BioType::Flush => self.device.flush(request),
-        }
-    }
-
     /// Negotiate features for the device specified bits 0~23
     pub(crate) fn negotiate_features(device_features: u64) -> u64 {
         BlockFeatures::negotiated_with_device(device_features).bits()
@@ -131,12 +119,12 @@ impl BlockDevice {
 
 impl aster_block::BlockDevice for BlockDevice {
     fn enqueue(&self, bio: SubmittedBio) -> Result<(), BioEnqueueError> {
-        self.queue.enqueue(bio)
+        self.dispatcher.enqueue(bio)
     }
 
     fn metadata(&self) -> BlockDeviceMeta {
         BlockDeviceMeta {
-            max_nr_segments_per_bio: self.queue.max_nr_segments_per_bio(),
+            max_nr_segments_per_bio: self.dispatcher.max_nr_segments(),
             nr_sectors: self.device.config_manager.capacity_sectors(),
         }
     }
@@ -531,6 +519,16 @@ impl DeviceInner {
                 .lock()
                 .insert(token, submitted_request);
             return;
+        }
+    }
+}
+
+impl BlockRequestHandler for DeviceInner {
+    fn handle_request(&self, request: BioRequest, _queue_id: usize) {
+        match request.type_() {
+            BioType::Read => self.read(request),
+            BioType::Write => self.write(request),
+            BioType::Flush => self.flush(request),
         }
     }
 }
