@@ -27,7 +27,7 @@ use ostd::{
     sync::SpinLock,
 };
 
-use super::{BlockFeatures, DISCARD_REQ_SIZE, VirtioBlockConfig, VirtioBlockDiscardReq};
+use super::{BlockFeatures, REQ_DWZ_SIZE, VirtioBlkDiscardWriteZeroes, VirtioBlockConfig};
 use crate::{
     VIRTIO_BLOCK_MAJOR_ID,
     device::{
@@ -121,6 +121,7 @@ impl BlockDevice {
             BioType::Write => self.device.write(request),
             BioType::Flush => self.device.flush(request),
             BioType::Discard => self.device.discard(request),
+            BioType::WriteZeroes => self.device.write_zeroes(request),
         }
     }
 
@@ -203,7 +204,7 @@ struct DeviceInner {
     transport: SpinLock<Box<dyn VirtioTransport>>,
     block_requests: Arc<DmaStream>,
     block_responses: Arc<DmaStream>,
-    discard_descs: Arc<DmaStream>,
+    dwz_descs: Arc<DmaStream>,
     id_allocator: SyncIdAlloc,
     submitted_requests: SpinLock<BTreeMap<u16, SubmittedRequest>>,
 }
@@ -249,12 +250,12 @@ impl DeviceInner {
             Arc::new(DmaStream::alloc(1, false).map_err(VirtioDeviceError::ResourceAlloc)?);
         let block_responses =
             Arc::new(DmaStream::alloc(1, false).map_err(VirtioDeviceError::ResourceAlloc)?);
-        let discard_descs =
+        let dwz_descs =
             Arc::new(DmaStream::alloc(1, false).map_err(VirtioDeviceError::ResourceAlloc)?);
         const {
             assert!(Self::QUEUE_SIZE as usize * REQ_SIZE <= PAGE_SIZE);
             assert!(Self::QUEUE_SIZE as usize * RESP_SIZE <= PAGE_SIZE);
-            assert!(Self::QUEUE_SIZE as usize * DISCARD_REQ_SIZE <= PAGE_SIZE);
+            assert!(Self::QUEUE_SIZE as usize * REQ_DWZ_SIZE <= PAGE_SIZE);
         }
 
         let device = Arc::new(Self {
@@ -264,7 +265,7 @@ impl DeviceInner {
             transport: SpinLock::new(transport),
             block_requests,
             block_responses,
-            discard_descs,
+            dwz_descs,
             id_allocator: SyncIdAlloc::with_capacity(Self::QUEUE_SIZE as usize),
             submitted_requests: SpinLock::new(BTreeMap::new()),
         });
@@ -485,21 +486,14 @@ impl DeviceInner {
         }
     }
 
-    /// Discards the specified sectors.
-    fn discard(&self, bio_request: BioRequest) {
-        if !self.features.contains(BlockFeatures::DISCARD) {
-            bio_request.into_bios().for_each(|bio| {
-                bio.complete(BioStatus::Complete);
-            });
-            return;
-        }
-
+    /// Submits a discard or write-zeroes request.
+    fn discard_write_zeroes(&self, bio_request: BioRequest, req_type: ReqType) {
         let id = self.id_allocator.alloc();
         let req_slice = {
             let req_slice =
                 Slice::new(&self.block_requests, id * REQ_SIZE..(id + 1) * REQ_SIZE);
             let req = BlockReq {
-                type_: ReqType::Discard as _,
+                type_: req_type as _,
                 reserved: 0,
                 sector: bio_request.sid_range().start.to_raw(),
             };
@@ -508,19 +502,19 @@ impl DeviceInner {
             req_slice
         };
 
-        let discard_slice = {
-            let discard_slice =
-                Slice::new(&self.discard_descs, id * DISCARD_REQ_SIZE..(id + 1) * DISCARD_REQ_SIZE);
+        let dwz_slice = {
+            let dwz_slice =
+                Slice::new(&self.dwz_descs, id * REQ_DWZ_SIZE..(id + 1) * REQ_DWZ_SIZE);
             let sid_range = bio_request.sid_range();
             let num_sectors = (sid_range.end.to_raw() - sid_range.start.to_raw()) as u32;
-            let discard_req = VirtioBlockDiscardReq {
+            let dwz_req = VirtioBlkDiscardWriteZeroes {
                 sector: sid_range.start.to_raw(),
                 num_sectors,
                 flags: 0,
             };
-            discard_slice.write_val(0, &discard_req).unwrap();
-            discard_slice.sync_to_device().unwrap();
-            discard_slice
+            dwz_slice.write_val(0, &dwz_req).unwrap();
+            dwz_slice.sync_to_device().unwrap();
+            dwz_slice
         };
 
         let resp_slice = {
@@ -531,8 +525,6 @@ impl DeviceInner {
             resp_slice
         };
 
-        // One descriptor for the input `req_slice`, one for the input `discard_slice`,
-        // and one for the output `resp_slice`.
         let num_used_descs = 3;
         loop {
             let mut queue = self.queue.disable_irq().lock();
@@ -540,13 +532,12 @@ impl DeviceInner {
                 continue;
             }
             let token = queue
-                .add_dma_bufs(&[&req_slice, &discard_slice], &[&resp_slice])
+                .add_dma_bufs(&[&req_slice, &dwz_slice], &[&resp_slice])
                 .expect("add queue failed");
             if queue.should_notify() {
                 queue.notify();
             }
 
-            // Records the submitted request
             let submitted_request = SubmittedRequest::new(id as u16, bio_request);
             self.submitted_requests
                 .disable_irq()
@@ -554,6 +545,28 @@ impl DeviceInner {
                 .insert(token, submitted_request);
             return;
         }
+    }
+
+    /// Discards the specified sectors.
+    fn discard(&self, bio_request: BioRequest) {
+        if !self.features.contains(BlockFeatures::DISCARD) {
+            bio_request.into_bios().for_each(|bio| {
+                bio.complete(BioStatus::Complete);
+            });
+            return;
+        }
+        self.discard_write_zeroes(bio_request, ReqType::Discard);
+    }
+
+    /// Writes zeroes to the specified sectors.
+    fn write_zeroes(&self, bio_request: BioRequest) {
+        if !self.features.contains(BlockFeatures::WRITE_ZEROES) {
+            bio_request.into_bios().for_each(|bio| {
+                bio.complete(BioStatus::Complete);
+            });
+            return;
+        }
+        self.discard_write_zeroes(bio_request, ReqType::WriteZeroes);
     }
 
     /// Flushes any cached data from the guest to the persistent storage on the host.

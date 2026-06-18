@@ -81,10 +81,13 @@ impl dyn BlockDevice {
         Ok(status)
     }
 
-    /// Issues a discard (TRIM) request for the given sector-aligned range.
-    ///
-    /// Both `offset` and `len` must be sector-aligned. An empty length is a no-op.
-    pub fn discard(&self, offset: usize, len: usize) -> ostd::Result<()> {
+    /// Issues a discard or write-zeroes request for the given sector-aligned range.
+    fn discard_write_zeroes(
+        &self,
+        offset: usize,
+        len: usize,
+        construct_bio: impl FnOnce(Sid, usize) -> Bio,
+    ) -> ostd::Result<()> {
         if len == 0 {
             return Ok(());
         }
@@ -95,12 +98,26 @@ impl dyn BlockDevice {
 
         let nr_sectors = len / SECTOR_SIZE;
         let start_sid = Sid::from_offset(offset);
-        let bio = Bio::discard(start_sid, nr_sectors, None);
+        let bio = construct_bio(start_sid, nr_sectors);
         let status = bio.submit_and_wait(self)?;
         match status {
             BioStatus::Complete => Ok(()),
             _ => Err(ostd::Error::IoError),
         }
+    }
+
+    /// Issues a write-zeroes request for the given sector-aligned range.
+    ///
+    /// Both `offset` and `len` must be sector-aligned. An empty length is a no-op.
+    pub fn write_zeroes(&self, offset: usize, len: usize) -> ostd::Result<()> {
+        self.discard_write_zeroes(offset, len, |sid, nr| Bio::write_zeroes(sid, nr, None))
+    }
+
+    /// Issues a discard (TRIM) request for the given sector-aligned range.
+    ///
+    /// Both `offset` and `len` must be sector-aligned. An empty length is a no-op.
+    pub fn discard(&self, offset: usize, len: usize) -> ostd::Result<()> {
+        self.discard_write_zeroes(offset, len, |sid, nr| Bio::discard(sid, nr, None))
     }
 }
 

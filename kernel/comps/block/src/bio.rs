@@ -77,18 +77,16 @@ impl Bio {
         }
     }
 
-    /// Constructs a new `Bio` for a discard (TRIM) request.
-    ///
-    /// The `start_sid` is the starting sector id on the device, and `nr_sectors`
-    /// is the number of contiguous sectors to discard.
-    pub fn discard(
+    /// Constructs a new `Bio` for a discard or write-zeroes request.
+    fn discard_write_zeroes(
         start_sid: Sid,
         nr_sectors: usize,
         complete_fn: Option<BioCompleteFn>,
+        bio_type: BioType,
     ) -> Self {
         let end_sid = start_sid + nr_sectors as u64;
         let metadata = Arc::new(BioMetadata {
-            type_: BioType::Discard,
+            type_: bio_type,
             sid_range: start_sid..end_sid,
             status: AtomicU32::new(BioStatus::Init as u32),
             wait_queue: WaitQueue::new(),
@@ -98,6 +96,30 @@ impl Bio {
             complete_fn,
             segments: Vec::new(),
         }
+    }
+
+    /// Constructs a new `Bio` for a discard (TRIM) request.
+    ///
+    /// The `start_sid` is the starting sector id on the device, and `nr_sectors`
+    /// is the number of contiguous sectors to discard.
+    pub fn discard(
+        start_sid: Sid,
+        nr_sectors: usize,
+        complete_fn: Option<BioCompleteFn>,
+    ) -> Self {
+        Self::discard_write_zeroes(start_sid, nr_sectors, complete_fn, BioType::Discard)
+    }
+
+    /// Constructs a new `Bio` for a write-zeroes request.
+    ///
+    /// The `start_sid` is the starting sector id on the device, and `nr_sectors`
+    /// is the number of contiguous sectors to zero.
+    pub fn write_zeroes(
+        start_sid: Sid,
+        nr_sectors: usize,
+        complete_fn: Option<BioCompleteFn>,
+    ) -> Self {
+        Self::discard_write_zeroes(start_sid, nr_sectors, complete_fn, BioType::WriteZeroes)
     }
 
     /// Returns the type.
@@ -365,7 +387,9 @@ pub enum BioType {
     Flush = 2,
     /// Discard (TRIM) sectors — a hint that the data is no longer needed.
     Discard = 3,
-    // TODO: Add support for other BIO types (SecureErase, WriteZeroes, Zone*).
+    /// Write zeroes to sectors on the device.
+    WriteZeroes = 4,
+    // TODO: Add support for other BIO types (SecureErase, Zone*).
 }
 
 /// The status of `Bio`.

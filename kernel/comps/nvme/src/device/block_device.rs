@@ -135,6 +135,10 @@ impl NvmeBlockDevice {
                 // TODO: Implement NVMe Dataset Management command for discard.
                 request.into_bios().for_each(|bio| bio.complete(BioStatus::Complete));
             }
+            BioType::WriteZeroes => {
+                // TODO: Implement NVMe Write Zeroes command.
+                request.into_bios().for_each(|bio| bio.complete(BioStatus::Complete));
+            }
         }
     }
 }

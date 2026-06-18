@@ -93,6 +93,12 @@ mod ioctl_defs {
     /// Argument is a `uint64_t[2]` (`{start_byte, length}`), both
     /// sector-aligned. Discarded reads return zeroes on supported devices.
     pub(super) type BlkDiscard = ioc!(BLKDISCARD, 0x12, 119, NoData);
+
+    /// Writes zeroes to sectors on a block device.
+    ///
+    /// Argument is a `uint64_t[2]` (`{sector, nr_sectors}`), both
+    /// sector-aligned.
+    pub(super) type BlkZeroout = ioc!(BLKZEROOUT, 0x12, 127, NoData);
 }
 
 /// Represents a block device inode in the filesystem.
@@ -240,6 +246,19 @@ impl PerOpenFileOps for OpenBlockFile {
                     );
                 }
                 self.0.discard(offset, len)?;
+                Ok(0)
+            }
+            _cmd @ BlkZeroout => {
+                let [offset, len]: [u64; 2] = current_userspace!().read_val(raw_ioctl.arg())?;
+                let offset = offset as usize;
+                let len = len as usize;
+                if offset % SECTOR_SIZE != 0 || len % SECTOR_SIZE != 0 || len == 0 {
+                    return_errno_with_message!(
+                        Errno::EINVAL,
+                        "offset and length must be sector-aligned and non-zero"
+                    );
+                }
+                self.0.write_zeroes(offset, len)?;
                 Ok(0)
             }
             _ => return_errno_with_message!(

@@ -32,7 +32,7 @@ bitflags! {
         const WRITE_ZEROES  = 1 << 14;
 
         const ALL_SUPPORTED =
-            Self::BLK_SIZE.bits() | Self::FLUSH.bits() | Self::DISCARD.bits();
+            Self::BLK_SIZE.bits() | Self::FLUSH.bits() | Self::DISCARD.bits() | Self::WRITE_ZEROES.bits();
     }
 }
 
@@ -125,18 +125,18 @@ struct VirtioBlockTopology {
     opt_io_size: u32,
 }
 
-/// A VirtIO block discard descriptor.
+/// A VirtIO block discard/write-zeroes descriptor.
 ///
-/// Refer to VirtIO 1.2 spec, Section 5.2.6.3 (discard command).
+/// Refer to VirtIO 1.2 spec, Section 5.2.6.3 (discard and write zeroes commands).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod)]
-pub(super) struct VirtioBlockDiscardReq {
+pub(super) struct VirtioBlkDiscardWriteZeroes {
     pub sector: u64,
     pub num_sectors: u32,
     pub flags: u32,
 }
 
-pub(super) const DISCARD_REQ_SIZE: usize = size_of::<VirtioBlockDiscardReq>();
+pub(super) const REQ_DWZ_SIZE: usize = size_of::<VirtioBlkDiscardWriteZeroes>();
 
 impl VirtioBlockConfig {
     pub(self) fn new_manager(transport: &dyn VirtioTransport) -> ConfigManager<Self> {
