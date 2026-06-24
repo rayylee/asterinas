@@ -373,6 +373,94 @@ impl ExfatFs {
     pub fn mount_option(&self) -> ExfatMountOptions {
         self.mount_option.clone()
     }
+
+    /// Trims free clusters by issuing discard (TRIM) commands to the block device.
+    /// Returns the total number of bytes trimmed.
+    pub(super) fn trim_fs(
+        &self,
+        start: u64,
+        len: u64,
+        minlen: u64,
+    ) -> Result<u64> {
+        let cluster_size = self.cluster_size() as u64;
+
+        error!(
+            "trim_fs entered: cluster_size={}, start={}, len={}, minlen={}",
+            cluster_size, start, len, minlen
+        );
+
+        let min_clusters = if minlen == 0 {
+            1
+        } else {
+            (minlen + cluster_size - 1).div_ceil(cluster_size) as u32
+        };
+
+        let data_start = self.super_block.data_start_sector as u64
+            * self.super_block.sector_size as u64;
+
+        let start_cluster = if start == 0 {
+            EXFAT_FIRST_CLUSTER
+        } else {
+            if start <= data_start {
+                EXFAT_FIRST_CLUSTER
+            } else {
+                EXFAT_RESERVED_CLUSTERS
+                    + ((start - data_start) / cluster_size) as u32
+            }
+        };
+
+        let end_cluster = if len == 0 {
+            self.super_block.num_clusters
+        } else {
+            if start + len <= data_start {
+                error!("trim_fs: start+len <= data_start, returning 0");
+                return Ok(0);
+            }
+            let end_off = (start + len).saturating_sub(data_start);
+            let num_clusters = end_off.div_ceil(cluster_size) as u32;
+            core::cmp::min(
+                self.super_block.num_clusters,
+                EXFAT_RESERVED_CLUSTERS + num_clusters,
+            )
+        };
+
+        let num_free = self.bitmap.lock().num_free_clusters();
+        error!(
+            "trim_fs: cluster_range=[{}, {}), min_clusters={}, data_start={}, num_free_clusters={}",
+            start_cluster, end_cluster, min_clusters, data_start, num_free
+        );
+
+        let _fs_guard = self.lock();
+        let bitmap = self.bitmap.lock();
+        let mut total_trimmed: u64 = 0;
+
+        bitmap.for_each_free_range(
+            start_cluster..end_cluster,
+            min_clusters,
+            &mut |range: Range<ClusterID>| {
+                let offset = self.cluster_to_off(range.start);
+                let discard_len =
+                    (range.end - range.start) as u64 * cluster_size;
+                error!(
+                    "trim_fs: discarding range={:?}, offset={}, len={}",
+                    range, offset, discard_len
+                );
+                if let Err(e) =
+                    self.block_device.discard(offset, discard_len as usize)
+                {
+                    error!(
+                        "discard FAILED at offset {} len {}: {:?}",
+                        offset, discard_len, e
+                    );
+                } else {
+                    total_trimmed += discard_len;
+                }
+            },
+        );
+
+        error!("trim_fs completed: total_trimmed={}", total_trimmed);
+        Ok(total_trimmed)
+    }
 }
 
 impl BlockAsPageCacheBackend for ExfatFs {

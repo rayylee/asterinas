@@ -341,7 +341,7 @@ impl FileLike for InodeHandle {
             return open_file.ioctl(raw_ioctl);
         }
 
-        return_errno_with_message!(Errno::ENOTTY, "ioctl is not supported");
+        self.path.inode().ioctl(raw_ioctl)
     }
 
     fn mappable(&self) -> Result<Mappable> {

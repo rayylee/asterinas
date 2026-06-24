@@ -29,6 +29,7 @@ use crate::{
     },
     security::lsm::hooks as lsm_hooks,
     time::clocks::RealTimeCoarseClock,
+    util::ioctl::RawIoctl,
     vm::page_cache::PageCache,
 };
 
@@ -443,6 +444,11 @@ pub trait Inode: Any + FileOps + Send + Sync {
     /// the manipulated range starts at `offset` and continues for `len` bytes.
     fn fallocate(&self, mode: FallocMode, offset: usize, len: usize) -> Result<()> {
         return_errno!(Errno::EOPNOTSUPP);
+    }
+
+    /// Performs an ioctl operation on this inode.
+    fn ioctl(&self, _raw_ioctl: RawIoctl) -> Result<i32> {
+        return_errno_with_message!(Errno::ENOTTY, "ioctl is not supported");
     }
 
     fn fs(&self) -> Arc<dyn FileSystem>;

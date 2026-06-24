@@ -37,8 +37,25 @@ use crate::{
     },
     prelude::*,
     process::{Gid, Uid},
+    util::ioctl::{dispatch_ioctl, RawIoctl},
     vm::page_cache::{BlockAsPageCacheBackend, PageCache},
 };
+
+mod ioctl_defs {
+    use crate::util::ioctl::ioc;
+    use crate::util::ioctl::InOutData;
+
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, Pod)]
+    pub(super) struct FstrimRange {
+        pub start: u64,
+        pub len: u64,
+        pub minlen: u64,
+    }
+
+    // Reference: <https://elixir.bootlin.com/linux/v6.18/source/include/uapi/linux/fs.h>
+    pub(super) type Fitrim = ioc!(FITRIM, b'X', 121, InOutData<FstrimRange>);
+}
 
 ///Inode number
 pub type Ino = u64;
@@ -1718,6 +1735,34 @@ impl Inode for ExfatInode {
 
     fn write_link(&self, target: &str) -> Result<()> {
         return_errno_with_message!(Errno::EINVAL, "unsupported operation")
+    }
+
+    fn ioctl(&self, raw_ioctl: RawIoctl) -> Result<i32> {
+        use ioctl_defs::*;
+
+        error!(
+            "ExfatInode::ioctl called: raw_ioctl.cmd = {:#010x}",
+            raw_ioctl.cmd()
+        );
+
+        dispatch_ioctl!(match raw_ioctl {
+            cmd @ Fitrim => {
+                error!("FITRIM matched (cmd={:#010x}), starting trim", raw_ioctl.cmd());
+                let mut range = cmd.read()?;
+                let trimmed = self.inner.read().fs().trim_fs(range.start, range.len, range.minlen)?;
+                range.len = trimmed;
+                cmd.write(&range)?;
+                error!("FITRIM completed: trimmed {} bytes", trimmed);
+                Ok(0)
+            }
+            _ => {
+                error!(
+                    "ExfatInode::ioctl: unknown ioctl cmd={:#010x}",
+                    raw_ioctl.cmd()
+                );
+                return_errno_with_message!(Errno::ENOTTY, "unknown ioctl")
+            }
+        })
     }
 
     fn sync_all(&self) -> Result<()> {

@@ -9,7 +9,7 @@ use align_ext::AlignExt;
 use bitvec::prelude::*;
 
 use super::{
-    constants::EXFAT_RESERVED_CLUSTERS,
+    constants::{EXFAT_FIRST_CLUSTER, EXFAT_RESERVED_CLUSTERS},
     dentry::{ExfatBitmapDentry, ExfatDentry, ExfatDentryIterator},
     fat::{ClusterID, ExfatChain},
     fs::ExfatFs,
@@ -382,5 +382,32 @@ impl ExfatBitmap {
             self.fs().sync_meta_at(range)?;
         }
         Ok(())
+    }
+
+    pub(super) fn for_each_free_range(
+        &self,
+        clusters: Range<ClusterID>,
+        min_len: u32,
+        f: &mut dyn FnMut(Range<ClusterID>),
+    ) {
+        let start = clusters.start.max(EXFAT_FIRST_CLUSTER);
+        let end = clusters.end.min(self.fs().super_block().num_clusters);
+        let mut cur = start;
+        while cur < end {
+            if !self.is_used((cur - EXFAT_RESERVED_CLUSTERS) as usize) {
+                let free_start = cur;
+                cur += 1;
+                while cur < end
+                    && !self.is_used((cur - EXFAT_RESERVED_CLUSTERS) as usize)
+                {
+                    cur += 1;
+                }
+                if cur - free_start >= min_len {
+                    f(free_start..cur);
+                }
+            } else {
+                cur += 1;
+            }
+        }
     }
 }
