@@ -52,7 +52,10 @@ fn virtio_component_init() -> Result<(), ComponentInitError> {
     device::socket::init();
 
     while let Some(mut transport) = pop_device_transport() {
-        // Reset device
+        // Follows VirtIO 1.3, 3.1.1 "Driver Requirements: Device Initialization".
+        // Reference: <https://docs.oasis-open.org/virtio/virtio/v1.3/virtio-v1.3.html#x1-1230001>
+
+        // Resets the device.
         transport
             .write_device_status(DeviceStatus::empty())
             .unwrap();
@@ -60,15 +63,21 @@ fn virtio_component_init() -> Result<(), ComponentInitError> {
             spin_loop();
         }
 
-        // Set to acknowledge
+        // Sets `ACKNOWLEDGE` to report that the guest OS has noticed the device.
+        transport
+            .write_device_status(DeviceStatus::ACKNOWLEDGE)
+            .unwrap();
+
+        // Sets `DRIVER` to report that the guest OS knows how to drive the device.
         transport
             .write_device_status(DeviceStatus::ACKNOWLEDGE | DeviceStatus::DRIVER)
             .unwrap();
-        // negotiate features
+
+        // Negotiates the feature subset supported by the driver.
         negotiate_features(&mut transport);
 
         if !transport.is_legacy_version() {
-            // change to features ok status
+            // Sets `FEATURES_OK` to report that feature negotiation is complete.
             let status =
                 DeviceStatus::ACKNOWLEDGE | DeviceStatus::DRIVER | DeviceStatus::FEATURES_OK;
             transport.write_device_status(status).unwrap();
