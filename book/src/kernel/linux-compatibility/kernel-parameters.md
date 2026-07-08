@@ -106,10 +106,8 @@ loglevel=error
 Notes:
 - Level names are case-sensitive; use lowercase names.
 - If omitted, the default is `8` (`debug`). Invalid values are ignored.
-- Use `warn` for normal operation, `info`/`debug` when troubleshooting, 
+- Use `warn` for normal operation, `info`/`debug` when troubleshooting,
   and `error` or lower for a quieter console.
-
-## Asterinas-specific
 
 ### `i8042.exist`
 
@@ -124,4 +122,23 @@ Examples:
 i8042.exist
 i8042.exist=1
 i8042.exist=0
+```
+
+### `i8042.reset`
+
+Force the i8042 controller self-test during initialization.
+
+The default is off — no self-test is performed, because the self-test may be unsupported
+on some platforms. Set this flag to run the self-test on hardware where the controller
+is suspected to be faulty.
+
+Valid values:
+- `1`, `on`, `yes`, `true` or no value — run the controller self-test
+- `0`, `off`, `no`, `false` — skip the controller self-test (default)
+
+Examples:
+```text
+i8042.reset
+i8042.reset=1
+i8042.reset=0
 ```
