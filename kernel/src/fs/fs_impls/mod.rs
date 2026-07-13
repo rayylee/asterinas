@@ -13,6 +13,7 @@ pub mod overlayfs;
 pub mod procfs;
 pub mod pseudofs;
 pub mod ramfs;
+pub mod squashfs;
 pub mod sysfs;
 pub mod tmpfs;
 pub mod virtiofs;
@@ -30,6 +31,7 @@ pub(super) fn init() {
     ext2::init();
     exfat::init();
     overlayfs::init();
+    squashfs::init();
     virtiofs::init();
 }
 
