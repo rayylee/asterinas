@@ -132,9 +132,9 @@ pub fn do_cached_build(
     action: ActionChoice,
     rustflags: &[&str],
 ) -> Bundle {
-    let (build, boot, grub) = match action {
-        ActionChoice::Run => (&config.run.build, &config.run.boot, &config.run.grub),
-        ActionChoice::Test => (&config.test.build, &config.test.boot, &config.test.grub),
+    let (build, boot) = match action {
+        ActionChoice::Run => (&config.run.build, &config.run.boot),
+        ActionChoice::Test => (&config.test.build, &config.test.boot),
     };
 
     let mut rustflags = rustflags.to_vec();
@@ -184,17 +184,42 @@ pub fn do_cached_build(
             }
             bundle.consume_aster_bin(aster_elf);
         }
-        BootMethod::QemuDirect => {
-            let aster_bin = match grub.boot_protocol {
-                BootProtocol::Linux => make_install_bzimage(
-                    &osdk_output_directory,
-                    &osdk_output_directory,
-                    &boot_elf,
-                    build.linux_x86_legacy_boot,
-                    config.build.encoding.clone(),
-                ),
-                _ => make_elf_for_qemu(boot_elf),
-            };
+        BootMethod::BzImage => {
+            if !boot.protocol.is_linux() {
+                error_msg!(
+                    "`bzimage` boot images require a Linux boot protocol, got `{:#?}`",
+                    boot.protocol
+                );
+                process::exit(Errno::BuildCrate as _);
+            }
+            let aster_bin = make_install_bzimage(
+                &osdk_output_directory,
+                &osdk_output_directory,
+                &boot_elf,
+                build.linux_x86_legacy_boot || boot.protocol.is_linux_legacy32(),
+                config.build.encoding.clone(),
+            );
+            bundle.consume_aster_bin(aster_bin);
+        }
+        BootMethod::Elf => {
+            if boot.protocol.is_linux() {
+                error_msg!(
+                    "`elf` boot images do not support Linux boot protocol `{:#?}`",
+                    boot.protocol
+                );
+                process::exit(Errno::BuildCrate as _);
+            }
+            if !matches!(
+                boot.protocol,
+                BootProtocol::Multiboot | BootProtocol::Multiboot2
+            ) {
+                error_msg!(
+                    "unsupported boot protocol `{:#?}` for `elf` image",
+                    boot.protocol
+                );
+                process::exit(Errno::BuildCrate as _);
+            }
+            let aster_bin = make_elf_for_qemu(boot_elf);
             bundle.consume_aster_bin(aster_bin);
         }
     }

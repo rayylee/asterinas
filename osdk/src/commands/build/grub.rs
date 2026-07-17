@@ -32,7 +32,7 @@ pub fn create_bootdev_image(
         ActionChoice::Run => &config.run,
         ActionChoice::Test => &config.test,
     };
-    let protocol = &action.grub.boot_protocol;
+    let protocol = action.boot.protocol;
 
     // Clear or make the iso dir.
     if iso_root.exists() {
@@ -50,21 +50,18 @@ pub fn create_bootdev_image(
     }
 
     // Make the kernel image and place it in the boot directory.
-    match protocol {
-        BootProtocol::Linux => {
-            make_install_bzimage(
-                iso_root.join("boot"),
-                &target_dir,
-                aster_bin,
-                action.build.linux_x86_legacy_boot,
-                config.build.encoding.clone(),
-            );
-        }
-        _ => {
-            // Copy the kernel image to the boot directory.
-            let target_path = iso_root.join("boot").join(&target_name);
-            hard_link_or_copy(aster_bin.path(), target_path).unwrap();
-        }
+    if protocol.is_linux() {
+        make_install_bzimage(
+            iso_root.join("boot"),
+            &target_dir,
+            aster_bin,
+            action.build.linux_x86_legacy_boot || protocol.is_linux_legacy32(),
+            config.build.encoding.clone(),
+        );
+    } else {
+        // Copy the kernel image to the boot directory.
+        let target_path = iso_root.join("boot").join(&target_name);
+        hard_link_or_copy(aster_bin.path(), target_path).unwrap();
     };
 
     // Write the grub.cfg file
@@ -106,7 +103,7 @@ fn generate_grub_cfg(
     kcmdline: &str,
     skip_grub_menu: bool,
     initramfs_path: Option<String>,
-    protocol: &BootProtocol,
+    protocol: BootProtocol,
 ) -> String {
     let target_name = get_current_crates().remove(0).name;
     let grub_cfg = include_str!("grub.cfg.template").to_string();
@@ -151,7 +148,7 @@ fn generate_grub_cfg(
                     "".to_owned()
                 },
             ),
-        BootProtocol::Linux => grub_cfg
+        _ => grub_cfg
             .replace("#GRUB_CMD_KERNEL#", "linux")
             .replace("#KERNEL#", &aster_bin_path_on_device)
             .replace(

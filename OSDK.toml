@@ -4,9 +4,7 @@
 # The common options for build, run and test
 [boot]
 method = "grub-rescue-iso"
-
-[grub]
-boot_protocol = "multiboot2"
+protocol = "multiboot2"
 
 [qemu]
 args = "$(./tools/qemu_args.sh normal)"
@@ -31,7 +29,8 @@ args = "$(./tools/qemu_args.sh test)"
 # Other Schemes
 
 [scheme."microvm"]
-boot.method = "qemu-direct"
+boot.method = "elf"
+boot.protocol = "multiboot2"
 build.strip_elf = true
 qemu.args = "$(./tools/qemu_args.sh microvm)"
 
@@ -43,19 +42,19 @@ qemu.args = "$(./tools/qemu_args.sh iommu)"
 supported_archs = ["x86_64"]
 build.features = ["cvm_guest"]
 boot.method = "grub-qcow2"
-grub.boot_protocol = "linux"
+boot.protocol = "linux-efi-handover64"
 qemu.args = "$(./tools/qemu_args.sh tdx)"
 
 [scheme."riscv"]
 supported_archs = ["riscv64"]
-boot.method = "qemu-direct"
+boot.method = "elf"
 build.strip_elf = false
 qemu.args = "$(./tools/qemu_args.sh riscv)"
 
 [scheme."sifive_u"]
 supported_archs = ["riscv64"]
 build.features = ["riscv_sv39_mode"]
-boot.method = "qemu-direct"
+boot.method = "elf"
 build.strip_elf = false
 qemu.with_monitor = true
 
@@ -72,7 +71,7 @@ qemu.args = """\
 """
 
 [scheme."loongarch"]
-boot.method = "qemu-direct"
+boot.method = "elf"
 build.strip_elf = false
 
 qemu.args = """\

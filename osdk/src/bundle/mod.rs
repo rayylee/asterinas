@@ -24,7 +24,7 @@ use crate::{
     arch::Arch,
     config::{
         Config,
-        scheme::{ActionChoice, BootMethod, BootProtocol},
+        scheme::{ActionChoice, BootMethod},
     },
     error::Errno,
     error_msg,
@@ -171,24 +171,25 @@ impl Bundle {
             || self_action.qemu != config_action.qemu
             || self_action.build != config_action.build
             || self_action.boot.kcmdline != config_action.boot.kcmdline
+            || self_action.boot.protocol != config_action.boot.protocol
         {
             return Err("The bundle is not compatible with the run configuration".to_owned());
         }
 
         // Checkout if the files on disk supports the boot method
         match config_action.boot.method {
-            BootMethod::QemuDirect => {
+            BootMethod::Elf | BootMethod::BzImage => {
                 if self.manifest.aster_bin.is_none() {
                     return Err("Kernel binary is required for direct QEMU booting".to_owned());
                 };
 
                 // Validate the kernel binary type against the configured boot protocol.
                 // This prevents reusing an incompatible binary (e.g. ELF vs. `bzImage`) when
-                // switching boot methods (for example, from a Grub ISO to `qemu-direct`),
+                // switching boot image formats (for example, from a Grub ISO to a direct image),
                 // which would otherwise cause boot failures.
                 let aster_bin_type = self.manifest.aster_bin.as_ref().unwrap().typ();
                 let expects_linux = matches!(aster_bin_type, AsterBinType::BzImage(_));
-                let actual_linux = config_action.grub.boot_protocol == BootProtocol::Linux;
+                let actual_linux = config_action.boot.protocol.is_linux();
                 if expects_linux != actual_linux {
                     return Err(
                         "The boot protocol is not compatible with the kernel binary".to_owned()
@@ -266,7 +267,7 @@ impl Bundle {
         qemu_cmd.current_dir(&config.work_dir);
 
         match action.boot.method {
-            BootMethod::QemuDirect => {
+            BootMethod::Elf | BootMethod::BzImage => {
                 let aster_bin = self.manifest.aster_bin.as_ref().unwrap();
                 qemu_cmd
                     .arg("-kernel")

@@ -159,9 +159,11 @@ impl ActionScheme {
     }
 
     pub fn finalize(self, arch: Arch) -> Action {
+        let grub = self.grub.unwrap_or_default().finalize();
+        let boot = self.boot.unwrap_or_default().finalize(grub.boot_protocol);
         Action {
-            boot: self.boot.unwrap_or_default().finalize(),
-            grub: self.grub.unwrap_or_default().finalize(),
+            boot,
+            grub,
             qemu: self.qemu.unwrap_or_default().finalize(arch),
             build: self.build.unwrap_or_default().finalize(),
         }

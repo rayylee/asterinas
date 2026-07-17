@@ -156,11 +156,7 @@ CARGO_OSDK_COMMON_ARGS += --scheme tdx
 endif
 
 ifeq ($(BOOT_PROTOCOL), multiboot)
-BOOT_METHOD = qemu-direct
-endif
-
-ifeq ($(SCHEME), microvm)
-BOOT_METHOD = qemu-direct
+BOOT_METHOD = elf
 endif
 
 ifeq ($(SCHEME), "")
@@ -191,13 +187,13 @@ endif
 # To test the linux-efi-handover64 boot protocol, we need to use Debian's
 # GRUB release, which is installed in /usr/bin in our Docker image.
 ifeq ($(BOOT_PROTOCOL), linux-efi-handover64)
-CARGO_OSDK_COMMON_ARGS += --grub-mkrescue=/usr/bin/grub-mkrescue --grub-boot-protocol="linux"
+CARGO_OSDK_COMMON_ARGS += --grub-mkrescue=/usr/bin/grub-mkrescue --boot-protocol="$(BOOT_PROTOCOL)"
 else ifeq ($(BOOT_PROTOCOL), linux-efi-pe64)
-CARGO_OSDK_COMMON_ARGS += --grub-boot-protocol="linux"
+CARGO_OSDK_COMMON_ARGS += --boot-protocol="$(BOOT_PROTOCOL)"
 else ifeq ($(BOOT_PROTOCOL), linux-legacy32)
-CARGO_OSDK_COMMON_ARGS += --linux-x86-legacy-boot --grub-boot-protocol="linux" --strip-elf
+CARGO_OSDK_COMMON_ARGS += --linux-x86-legacy-boot --boot-protocol="$(BOOT_PROTOCOL)" --strip-elf
 else
-CARGO_OSDK_COMMON_ARGS += --grub-boot-protocol=$(BOOT_PROTOCOL)
+CARGO_OSDK_COMMON_ARGS += --boot-protocol=$(BOOT_PROTOCOL)
 endif
 
 ifeq ($(ENABLE_KVM), 1)

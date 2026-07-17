@@ -26,25 +26,25 @@ Below, you will find a comprehensive version of
 the available configurations in the manifest.
 
 ```toml
-project_type = "kernel"                     # <1> 
+project_type = "kernel"                     # <1>
 
 # --------------------------- the default scheme settings -------------------------------
 supported_archs = ["x86_64", "riscv64"]     # <2>
 
-# The common options for all build, run and test subcommands 
+# The common options for all build, run and test subcommands
 [build]                                     # <3>
 features = ["no_std", "alloc"]              # <4>
 profile = "dev"                             # <5>
 strip_elf = false                           # <6>
 encoding = "raw"                            # <7>
 [boot]                                      # <8>
-method = "qemu-direct"                      # <9>
-kcmd_args = ["SHELL=/bin/sh", "HOME=/"]     # <10>
-init_args = ["sh", "-l"]                    # <11>
-initramfs = "path/to/it"                    # <12>
-[grub]                                      # <13>  
-mkrescue_path = "path/to/it"                # <14>
-boot_protocol = "multiboot2"                # <15> 
+method = "elf"                              # <9>
+protocol = "multiboot2"                     # <10>
+kcmd_args = ["SHELL=/bin/sh", "HOME=/"]     # <11>
+init_args = ["sh", "-l"]                    # <12>
+initramfs = "path/to/it"                    # <13>
+[grub]                                      # <14>
+grub_mkrescue = "path/to/it"                # <15>
 display_grub_menu = false                   # <16>
 [qemu]                                      # <17>
 path = "path/to/it"                         # <18>
@@ -80,7 +80,7 @@ Here are some additional notes for the fields:
     the default value is inferred from the usage of the macro `#[ostd::main]`.
     if the macro is used, the default value is `kernel`.
     Otherwise, the default value is `library`.
-    
+
     Possible values are `library` or `kernel`.
 
 2. The architectures that can be supported.
@@ -104,7 +104,7 @@ Here are some additional notes for the fields:
 
     Optional. The default value is `dev`.
 
-    Possible values are `dev`, `release`, `test`, and `bench` 
+    Possible values are `dev`, `release`, `test`, and `bench`
     and other profiles defined in `Cargo.toml`.
 
 6. Whether to strip the built kernel ELF using `rust-strip`.
@@ -123,11 +123,18 @@ Here are some additional notes for the fields:
 
 9. The boot method.
 
-    Optional. The default value is `qemu-direct`.
+    Optional. The default value is `elf`.
 
-    Possible values are `grub-rescue-iso`, `grub-qcow2` and `qemu-direct`.
+    Possible values are `elf`, `bzimage`, `grub-rescue-iso`, and `grub-qcow2`.
 
-10. The arguments provided will be passed to the guest kernel.
+10. The boot protocol or entry ABI used by the boot image.
+
+    Optional. The default value is `multiboot2`.
+
+    Possible values are `linux`, `linux-legacy32`, `linux-efi-pe64`,
+    `linux-efi-handover64`, `multiboot`, and `multiboot2`.
+
+11. The arguments provided will be passed to the guest kernel.
 
     Optional. The default value is empty.
 
@@ -135,30 +142,24 @@ Here are some additional notes for the fields:
     `KEY=VALUE` or `KEY` if no value is required.
     Each `KEY` can appear at most once.
 
-11. The arguments provided will be passed to the init process,
+12. The arguments provided will be passed to the init process,
 usually, the init shell.
 
     Optional. The default value is empty.
 
-12. The path to the initramfs.
+13. The path to the initramfs.
 
     Optional. The default value is empty.
 
     If the path is relative, it is relative to the manifest's enclosing directory.
 
-13. Grub options. Only take effect if boot method is `grub-rescue-iso` or `grub-qcow2`.
+14. Grub options. Only take effect if boot method is `grub-rescue-iso` or `grub-qcow2`.
 
-14. The path to the `grub-mkrescue` executable.
+15. The path to the `grub-mkrescue` executable.
 
     Optional. The default value is the executable in the system path, if any.
 
     If the path is relative, it is relative to the manifest's enclosing directory.
-
-15. The protocol GRUB used.
-
-    Optional. The default value is `multiboot2`.
-
-    Possible values are `linux`, `multiboot`, `multiboot2`.
 
 16. Whether to display the GRUB menu when booting with GRUB.
 
@@ -193,23 +194,23 @@ can include any POSIX shell compliant separators.
 
 20. Special settings for running. Only take effect when running `cargo osdk run`.
 
-    By default, it inherits common options. 
-    
+    By default, it inherits common options.
+
     Values set here are used to override common options.
 
-21. Special settings for testing. 
+21. Special settings for testing.
 
     Similar to `20`, but only take effect when running `cargo osdk test`.
 
-22. The definition of customized scheme. 
+22. The definition of customized scheme.
 
-    A customized scheme has the same fields as the default scheme. 
+    A customized scheme has the same fields as the default scheme.
     By default, a customized scheme will inherit all options from the default scheme,
     unless overridden by new options.
 
 ### Example
 
-Here is a sound, self-explanatory example which is used by OSDK 
+Here is a sound, self-explanatory example which is used by OSDK
 in the Asterinas project.
 
 In the script `./tools/qemu_args.sh`, the environment variables will be

@@ -1,7 +1,8 @@
 project_type = "library"
 
 [boot]
-method = "qemu-direct"
+method = "elf"
+protocol = "multiboot2"
 
 [qemu]
 args = """\

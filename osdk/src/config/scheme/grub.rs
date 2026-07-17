@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use clap::ValueEnum;
-
 use std::path::PathBuf;
+
+use super::BootProtocol;
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct GrubScheme {
@@ -13,15 +13,6 @@ pub struct GrubScheme {
     /// Whether to display the GRUB menu, defaults to `false`
     #[serde(default)]
     pub display_grub_menu: bool,
-}
-
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, ValueEnum)]
-#[serde(rename_all = "kebab-case")]
-pub enum BootProtocol {
-    Linux,
-    Multiboot,
-    #[default]
-    Multiboot2,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

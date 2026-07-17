@@ -237,7 +237,7 @@ so it assumes you entered the Kata-ready environment through the
 Build the kernel first:
 
 ```bash
-(cd /root/asterinas && make kernel BOOT_METHOD=qemu-direct)
+(cd /root/asterinas && make kernel BOOT_METHOD=elf)
 ```
 
 Verify that the command produced the kernel image:

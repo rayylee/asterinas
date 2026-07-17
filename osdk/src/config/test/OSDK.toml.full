@@ -4,6 +4,7 @@ supported_archs = ["x86_64"]
 
 [boot]
 method = "grub-rescue-iso"
+protocol = "multiboot2"
 
 [run]
 boot.kcmd_args = [
@@ -18,10 +19,9 @@ boot.init_args = ["sh", "-l"]
 boot.initramfs = "/tmp/osdk_test_file"
 
 [test]
-boot.method = "qemu-direct"
+boot.method = "elf"
 
 [grub]
-boot_protocol = "multiboot2"
 display_grub_menu = true
 
 [qemu]
@@ -42,6 +42,6 @@ qemu.args = """\
 supported_archs = ["x86_64"]
 build.features = ["cvm_guest"]
 boot.method = "grub-qcow2"
-grub.mkrescue_path = "/tmp/osdk_test_file"
-grub.protocol = "linux"
+boot.protocol = "linux-efi-handover64"
+grub.grub_mkrescue = "/tmp/osdk_test_file"
 qemu.path = "/tmp/osdk_test_file"

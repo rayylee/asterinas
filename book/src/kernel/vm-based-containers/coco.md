@@ -237,13 +237,13 @@ Build the kernel and verify the output images:
 
 ```bash
 # Build the regular guest kernel
-cd /root/asterinas && make kernel BOOT_METHOD=qemu-direct
+cd /root/asterinas && make kernel BOOT_METHOD=elf
 
 # Verify the regular build output
 ls /root/asterinas/target/osdk/aster-kernel-osdk-bin.qemu_elf
 
 # Build the TDX guest kernel (only needed for the CVM path)
-cd /root/asterinas && make kernel BOOT_METHOD=qemu-direct INTEL_TDX=1
+cd /root/asterinas && make kernel BOOT_METHOD=elf INTEL_TDX=1
 
 # Verify the TDX build output
 # (Note that the TDX kernel uses a bzImage format without the `.qemu_elf` extension.)

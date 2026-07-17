@@ -14,21 +14,37 @@ pub struct BootScheme {
     pub init_args: Vec<String>,
     /// The path of initramfs
     pub initramfs: Option<PathBuf>,
-    /// The infrastructures used to boot the guest
+    /// The method used to boot the guest.
     pub method: Option<BootMethod>,
+    /// The boot protocol or entry ABI used by the boot image.
+    pub protocol: Option<BootProtocol>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, ValueEnum)]
 #[serde(rename_all = "kebab-case")]
 pub enum BootMethod {
-    /// Boot the kernel by making a rescue CD image.
-    GrubRescueIso,
-    /// Boot the kernel by making a Qcow2 image with Grub as the bootloader.
-    GrubQcow2,
-    /// Use the [QEMU direct boot](https://qemu-project.gitlab.io/qemu/system/linuxboot.html)
-    /// to boot the kernel with QEMU's built-in Seabios and Coreboot utilities.
+    /// Build a bootable ELF image.
     #[default]
-    QemuDirect,
+    Elf,
+    /// Build a Linux bzImage-compatible image.
+    #[serde(rename = "bzimage")]
+    BzImage,
+    /// Build a GRUB rescue CD image.
+    GrubRescueIso,
+    /// Build a qcow2 image with GRUB as the bootloader.
+    GrubQcow2,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+pub enum BootProtocol {
+    Linux,
+    LinuxLegacy32,
+    LinuxEfiPe64,
+    LinuxEfiHandover64,
+    Multiboot,
+    #[default]
+    Multiboot2,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -36,6 +52,7 @@ pub struct Boot {
     pub kcmdline: Vec<String>,
     pub initramfs: Option<PathBuf>,
     pub method: BootMethod,
+    pub protocol: BootProtocol,
 }
 
 impl BootScheme {
@@ -56,16 +73,40 @@ impl BootScheme {
         if self.method.is_none() {
             self.method = from.method;
         }
+        if self.protocol.is_none() {
+            self.protocol = from.protocol;
+        }
     }
 
-    pub fn finalize(self) -> Boot {
+    pub fn finalize(self, fallback_protocol: BootProtocol) -> Boot {
         let mut kcmdline = self.kcmd_args;
         kcmdline.push("--".to_owned());
         kcmdline.extend(self.init_args);
+
+        let protocol = self.protocol.unwrap_or(fallback_protocol);
+        let method = self.method.unwrap_or_default();
+
         Boot {
             kcmdline,
             initramfs: self.initramfs,
-            method: self.method.unwrap_or(BootMethod::QemuDirect),
+            method,
+            protocol,
         }
+    }
+}
+
+impl BootProtocol {
+    pub fn is_linux(self) -> bool {
+        matches!(
+            self,
+            BootProtocol::Linux
+                | BootProtocol::LinuxLegacy32
+                | BootProtocol::LinuxEfiPe64
+                | BootProtocol::LinuxEfiHandover64
+        )
+    }
+
+    pub fn is_linux_legacy32(self) -> bool {
+        matches!(self, BootProtocol::LinuxLegacy32)
     }
 }

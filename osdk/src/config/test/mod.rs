@@ -24,6 +24,14 @@ fn conditional_manifest() {
 
     // Default scheme
     let scheme = toml_manifest.get_scheme(None::<String>);
+    assert_eq!(
+        scheme.boot.as_ref().unwrap().method,
+        Some(scheme::BootMethod::GrubRescueIso)
+    );
+    assert_eq!(
+        scheme.boot.as_ref().unwrap().protocol,
+        Some(scheme::BootProtocol::Multiboot2)
+    );
     assert!(
         scheme
             .qemu
@@ -50,6 +58,24 @@ fn conditional_manifest() {
 
     // Tdx
     let scheme = toml_manifest.get_scheme(Some("tdx".to_owned()));
+    assert_eq!(
+        scheme.boot.as_ref().unwrap().method,
+        Some(scheme::BootMethod::GrubQcow2)
+    );
+    assert_eq!(
+        scheme.boot.as_ref().unwrap().protocol,
+        Some(scheme::BootProtocol::LinuxEfiHandover64)
+    );
+    assert_eq!(
+        scheme
+            .grub
+            .as_ref()
+            .unwrap()
+            .grub_mkrescue
+            .as_ref()
+            .unwrap(),
+        &PathBuf::from(tmp_file)
+    );
     assert_eq!(
         scheme.qemu.as_ref().unwrap().path.as_ref().unwrap(),
         &PathBuf::from(tmp_file)

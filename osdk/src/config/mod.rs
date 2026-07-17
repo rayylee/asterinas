@@ -78,8 +78,11 @@ fn apply_args_before_finalize(
             };
             boot.initramfs = Some(initramfs);
         }
-        if let Some(boot_method) = args.boot_method {
-            boot.method = Some(boot_method);
+        if let Some(method) = args.boot_method {
+            boot.method = Some(method);
+        }
+        if let Some(protocol) = args.boot_protocol {
+            boot.protocol = Some(protocol);
         }
     }
 
@@ -189,10 +192,9 @@ fn apply_args_after_finalize(action: &mut Action, args: &CommonArgs) {
 impl Config {
     pub fn new(scheme: &Scheme, common_args: &CommonArgs) -> Self {
         let check_compatibility = |protocol: BootProtocol, encoding: PayloadEncoding| {
-            if protocol != BootProtocol::Linux && encoding != PayloadEncoding::Raw {
+            if !protocol.is_linux() && encoding != PayloadEncoding::Raw {
                 panic!(
-                    "The encoding format is not allowed to be specified if the boot protocol is not {:#?}",
-                    BootProtocol::Linux
+                    "The encoding format is not allowed to be specified if the boot protocol is not Linux"
                 );
             }
         };
@@ -214,7 +216,7 @@ impl Config {
             apply_args_before_finalize(&mut run, common_args, scheme.work_dir.as_ref().unwrap());
             let mut run = run.finalize(target_arch);
             apply_args_after_finalize(&mut run, common_args);
-            check_compatibility(run.grub.boot_protocol, run.build.encoding.clone());
+            check_compatibility(run.boot.protocol, run.build.encoding.clone());
             run
         };
         let test = {
@@ -223,7 +225,7 @@ impl Config {
             apply_args_before_finalize(&mut test, common_args, scheme.work_dir.as_ref().unwrap());
             let mut test = test.finalize(target_arch);
             apply_args_after_finalize(&mut test, common_args);
-            check_compatibility(test.grub.boot_protocol, test.build.encoding.clone());
+            check_compatibility(test.boot.protocol, test.build.encoding.clone());
             test
         };
         Self {

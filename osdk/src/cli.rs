@@ -446,6 +446,13 @@ pub struct CommonArgs {
     )]
     pub boot_method: Option<BootMethod>,
     #[arg(
+        long = "boot-protocol",
+        help = "Boot protocol or entry ABI used by the boot image",
+        value_name = "PROTOCOL",
+        global = true
+    )]
+    pub boot_protocol: Option<BootProtocol>,
+    #[arg(
         long = "bootdev-append-options",
         help = "Additional QEMU `-drive` options for the boot device",
         value_name = "OPTIONS",
