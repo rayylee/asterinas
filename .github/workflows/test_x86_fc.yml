@@ -1,0 +1,61 @@
+name: "Test x86-64 (Firecracker)"
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  boot-test:
+    runs-on: ubuntu-latest
+    container:
+      image: asterinas/asterinas:0.18.0-20260702
+      options: -v /dev:/dev --privileged
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build kernel
+        run: make kernel BOOT_METHOD=direct-elf
+      - name: Run boot test with Firecracker
+        run: |
+          set -euo pipefail
+
+          KERNEL_PATH="./target/osdk/aster-kernel/aster-kernel-osdk-bin.elf"
+          INITRD_PATH="./test/initramfs/build/initramfs.cpio.gz"
+          BOOT_ARGS="console=ttyS0 earlycon loglevel=error init=/bin/echo Entered userspace"
+
+          cat << EOF > /tmp/fc-vm.json
+          {
+            "boot-source": {
+              "kernel_image_path": "$KERNEL_PATH",
+              "initrd_path": "$INITRD_PATH",
+              "boot_args": "$BOOT_ARGS"
+            },
+            "drives": [],
+            "machine-config": {
+              "vcpu_count": 2,
+              "mem_size_mib": 1024
+            }
+          }
+          EOF
+
+          firecracker --no-api --config-file /tmp/fc-vm.json > /var/log/fc-serial.log 2>&1 &
+
+          FC_PID=$!
+
+          TIMEOUT=60
+          for i in $(seq 1 $TIMEOUT); do
+              if grep -q "^Entered userspace" /var/log/fc-serial.log 2>/dev/null; then
+                  echo "Firecracker boot test passed"
+                  kill $FC_PID 2>/dev/null || true
+                  wait $FC_PID 2>/dev/null || true
+                  exit 0
+              fi
+              sleep 1
+          done
+
+          echo "Firecracker boot test failed (timeout)"
+          kill $FC_PID 2>/dev/null || true
+          wait $FC_PID 2>/dev/null || true
+          exit 1
