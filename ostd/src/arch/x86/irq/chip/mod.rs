@@ -6,6 +6,7 @@ use core::{
     ops::{Deref, DerefMut},
 };
 
+use acpi::madt::{Madt, MadtEntry};
 use ioapic::IoApic;
 use spin::Once;
 
@@ -161,8 +162,6 @@ impl Drop for MappedIrqLine {
 pub static IRQ_CHIP: Once<IrqChip> = Once::new();
 
 pub(in crate::arch) fn init(io_mem_builder: &IoMemAllocatorBuilder) {
-    use acpi::madt::{Madt, MadtEntry};
-
     // If there are no ACPI tables, or the ACPI tables do not provide us with information about
     // the I/O APIC, we may need to find another way to determine the I/O APIC address
     // correctly and reliably (e.g., by parsing the MultiProcessor Specification, which has
@@ -173,7 +172,8 @@ pub(in crate::arch) fn init(io_mem_builder: &IoMemAllocatorBuilder) {
     // "A one indicates that the system also has a PC-AT-compatible dual-8259 setup. The 8259
     // vectors must be disabled (that is, masked) when enabling the ACPI APIC operation"
     const PCAT_COMPAT: u32 = 1;
-    if madt_table.get().flags & PCAT_COMPAT != 0 {
+
+    if madt_table.get().flags & PCAT_COMPAT != 0 || pic::is_present() {
         pic::init_and_disable();
     }
 
