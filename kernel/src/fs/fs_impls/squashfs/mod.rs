@@ -74,8 +74,21 @@ impl fmt::Display for SquashfsError {
 }
 
 impl From<SquashfsError> for Error {
-    fn from(_e: SquashfsError) -> Self {
-        Error::new(Errno::EINVAL)
+    fn from(e: SquashfsError) -> Self {
+        let (errno, msg) = match e {
+            SquashfsError::IoError => (Errno::EIO, "I/O error"),
+            SquashfsError::InvalidMagic => (Errno::EINVAL, "invalid magic"),
+            SquashfsError::UnsupportedVersion(_, _) => {
+                (Errno::EINVAL, "unsupported version")
+            }
+            SquashfsError::InvalidBlockSize(_) => (Errno::EINVAL, "invalid block size"),
+            SquashfsError::UnsupportedCompression(_) => {
+                (Errno::EINVAL, "unsupported compression")
+            }
+            SquashfsError::DecompressError => (Errno::EIO, "decompression error"),
+            SquashfsError::CorruptedImage(detail) => (Errno::EIO, detail),
+        };
+        Error::with_message(errno, msg)
     }
 }
 
