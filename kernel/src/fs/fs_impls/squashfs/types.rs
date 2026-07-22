@@ -12,7 +12,7 @@ pub(super) fn read_u32(data: &[u8], offset: &mut usize) -> Result<u32, SquashfsE
     if *offset + 4 > data.len() {
         return Err(SquashfsError::CorruptedImage("short read"));
     }
-    let v = u32::from_ne_bytes(data[*offset..*offset + 4].try_into().unwrap());
+    let v = u32::from_le_bytes(data[*offset..*offset + 4].try_into().unwrap());
     *offset += 4;
     Ok(v)
 }
