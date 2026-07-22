@@ -171,6 +171,16 @@ $(EXT2_IMAGE):
 	@mkdir -p $(BUILD_DIR)
 	@dd if=/dev/zero of=$(EXT2_IMAGE) bs=2G count=1
 	@mke2fs $(EXT2_IMAGE)
+	@# Bake a fixture for the ext2 mmap EOF-tail regression test. The file is
+	@# filled with 'A' on disk, then its recorded size is shrunk to 5000 so the
+	@# on-disk last block still carries non-zero data beyond EOF. A correct
+	@# page-cache backend must zero-fill that tail on a fresh mmap read; the
+	@# bug exposes the stale 'A' bytes instead. This cannot be reproduced by an
+	@# in-guest file because ext2 zeroes every newly allocated block.
+	@head -c 8192 /dev/zero | tr '\0' 'A' > $(BUILD_DIR)/mmap_eof_tail.bin
+	@debugfs -w $(EXT2_IMAGE) -R "write $(BUILD_DIR)/mmap_eof_tail.bin mmap_eof_tail.bin"
+	@debugfs -w $(EXT2_IMAGE) -R "sif /mmap_eof_tail.bin size 5000"
+	@rm -f $(BUILD_DIR)/mmap_eof_tail.bin
 
 $(EXFAT_IMAGE):
 	@mkdir -p $(BUILD_DIR)

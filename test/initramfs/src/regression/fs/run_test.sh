@@ -90,6 +90,7 @@ test_ext2 "/ext2" "test_file.txt"
 ./ext2/fallocate
 ./ext2/file_io
 ./ext2/mknod
+./ext2/mmap_eof_tail
 ./ext2/namei
 ./ext2/open_dir
 ./ext2/open_unlink
