@@ -654,9 +654,9 @@ impl PageCacheBackend for SquashFsPageCacheBackend {
         let read_len = PAGE_SIZE.min(self.file_size - offset);
 
         let seg = Segment::from(locked_page.deref().clone());
-        let mut buf = vec![0u8; read_len];
+        let mut buf = vec![0u8; PAGE_SIZE];
         {
-            let mut writer = VmWriter::from(&mut buf[..]).to_fallible();
+            let mut writer = VmWriter::from(&mut buf[..read_len]).to_fallible();
             let reader = FileReader {
                 device: &self.device,
                 decompress: &self.decompress,
@@ -668,7 +668,10 @@ impl PageCacheBackend for SquashFsPageCacheBackend {
                 fragments: &self.fragments,
                 file_size: self.file_size,
             };
-            reader.read(offset, read_len, &mut writer)?;
+            let n = reader.read(offset, read_len, &mut writer)?;
+            if n != read_len {
+                return_errno_with_message!(Errno::EIO, "short read from SquashFS file data");
+            }
         }
         seg.write_bytes(0, &buf)
             .map_err(|_| Error::with_message(Errno::EIO, "failed to write page"))?;
