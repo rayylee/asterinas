@@ -643,7 +643,9 @@ impl PageCacheBackend for SquashFsPageCacheBackend {
         locked_page: LockedCachePage,
         _io_batch: &mut IoBatch,
     ) -> Result<()> {
-        let offset = idx * PAGE_SIZE;
+        let offset = idx
+            .checked_mul(PAGE_SIZE)
+            .ok_or_else(|| Error::with_message(Errno::EINVAL, "page index out of bounds"))?;
         if offset >= self.file_size {
             return Err(Error::with_message(
                 Errno::EINVAL,

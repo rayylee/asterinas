@@ -8,8 +8,8 @@
 //! and the lower 15 bits encode the compressed data size.
 //!
 //! Lookup tables (ID table, fragment table, export table) use
-//! a two-level structure: an 8-byte pointer at the table start
-//! address, followed by metadata blocks containing the actual data.
+//! a two-level structure: a list of 8-byte pointers at the table start
+//! address, each pointing to a metadata block containing the actual data.
 
 use aster_block::BlockDevice;
 use ostd::mm::VmIo;
@@ -155,9 +155,8 @@ pub(super) fn read_fragment_table(
 
 /// Reads a lookup table (ID, fragment, or export table).
 ///
-/// A lookup table consists of an 8-byte pointer at `table_pos`,
-/// followed by metadata blocks containing the actual table data.
-/// The `parse_fn` is called with the raw decompressed bytes to produce the final typed entries.
+/// Delegates to [`read_lookup_table_raw`] for the raw bytes, then applies
+/// `parse_fn` to produce the final typed entries.
 fn read_lookup_table<T>(
     device: &Arc<dyn BlockDevice>,
     table_pos: u64,
@@ -166,29 +165,15 @@ fn read_lookup_table<T>(
     decompress: &DecompressContext,
     parse_fn: fn(&[u8]) -> Result<Vec<T>, SquashfsError>,
 ) -> Result<Vec<T>, SquashfsError> {
-    let mut ptr_buf = [0u8; 8];
-    device
-        .read_bytes(table_pos as usize, &mut ptr_buf)
-        .map_err(|_| SquashfsError::IoError)?;
-    let ptr = u64::from_le_bytes(ptr_buf);
-
-    let total_size = entry_size * entry_count as usize;
-    let block_count = total_size.div_ceil(METADATA_MAX_SIZE) as u64;
-
-    let mut all_data = Vec::with_capacity(total_size);
-    let mut pos = ptr;
-
-    for _ in 0..block_count {
-        let (mut block_data, consumed) = read_single_metadata_block(device, pos, decompress)?;
-        all_data.append(&mut block_data);
-        pos += consumed as u64;
-    }
-
-    all_data.truncate(total_size);
+    let all_data = read_lookup_table_raw(device, table_pos, entry_size, entry_count, decompress)?;
     parse_fn(&all_data)
 }
 
 /// Read a lookup table and return the raw decompressed bytes without parsing.
+///
+/// The on-disk layout at `table_pos` is:
+/// - `block_count` consecutive u64 pointers, each pointing to an independent
+///   metadata block. The metadata blocks are **not** necessarily contiguous.
 fn read_lookup_table_raw(
     device: &Arc<dyn BlockDevice>,
     table_pos: u64,
@@ -196,22 +181,22 @@ fn read_lookup_table_raw(
     entry_count: u64,
     decompress: &DecompressContext,
 ) -> Result<Vec<u8>, SquashfsError> {
-    let mut ptr_buf = [0u8; 8];
-    device
-        .read_bytes(table_pos as usize, &mut ptr_buf)
-        .map_err(|_| SquashfsError::IoError)?;
-    let ptr = u64::from_le_bytes(ptr_buf);
-
     let total_size = entry_size * entry_count as usize;
-    let block_count = total_size.div_ceil(METADATA_MAX_SIZE) as u64;
+    let block_count = total_size.div_ceil(METADATA_MAX_SIZE);
+
+    let mut block_locations = vec![0u64; block_count];
+    for (i, loc) in block_locations.iter_mut().enumerate() {
+        let mut buf = [0u8; 8];
+        device
+            .read_bytes((table_pos + i as u64 * 8) as usize, &mut buf)
+            .map_err(|_| SquashfsError::IoError)?;
+        *loc = u64::from_le_bytes(buf);
+    }
 
     let mut all_data = Vec::with_capacity(total_size);
-    let mut pos = ptr;
-
-    for _ in 0..block_count {
-        let (mut block_data, consumed) = read_single_metadata_block(device, pos, decompress)?;
-        all_data.append(&mut block_data);
-        pos += consumed as u64;
+    for &loc in &block_locations {
+        let (block_data, _) = read_single_metadata_block(device, loc, decompress)?;
+        all_data.extend_from_slice(&block_data);
     }
 
     all_data.truncate(total_size);
