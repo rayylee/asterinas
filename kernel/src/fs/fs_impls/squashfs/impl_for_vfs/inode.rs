@@ -181,12 +181,7 @@ impl FileOps for SquashFsInode {
         }
 
         let mut count = 0;
-        for (i, entry) in entries.iter().enumerate() {
-            if i < offset {
-                count += 1;
-                continue;
-            }
-
+        for (i, entry) in entries.iter().enumerate().skip(offset) {
             let child_type = squash_inodeid_to_vfs_type(entry.inode_type);
             let name = core::str::from_utf8(&entry.name).unwrap_or("");
             visitor.visit(name, entry.inode_num as u64, child_type, i + 1)?;
