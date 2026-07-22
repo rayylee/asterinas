@@ -507,6 +507,12 @@ impl FileReader<'_> {
 
         let mut total_written = 0;
 
+        let mut disk_pos = self.blocks_start
+            + self.block_sizes[..start_block]
+                .iter()
+                .map(|b| b.size as u64)
+                .sum::<u64>();
+
         for block_idx in start_block..end_block.min(nblocks) {
             let block_start_byte = block_idx * bs;
             let info = &self.block_sizes[block_idx];
@@ -525,16 +531,11 @@ impl FileReader<'_> {
                 continue;
             }
 
-            let disk_pos = self.blocks_start
-                + self.block_sizes[..block_idx]
-                    .iter()
-                    .map(|b| b.size as u64)
-                    .sum::<u64>();
-
             let mut compressed = vec![0u8; compressed_size];
             self.device
                 .read_bytes(disk_pos as usize, &mut compressed)
                 .map_err(|_| Error::with_message(Errno::EIO, "failed to read block"))?;
+            disk_pos += compressed_size as u64;
 
             let block_data = if info.compressed {
                 let mut out = Vec::with_capacity(bs);
