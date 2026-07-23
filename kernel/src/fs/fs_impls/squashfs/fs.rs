@@ -54,6 +54,7 @@ pub(crate) struct SquashFs {
     pub(super) decompress: DecompressContext,
     anon_device_id: AnonDeviceId,
     self_ref: Weak<SquashFs>,
+    inode_cache: RwMutex<BTreeMap<u32, Weak<dyn Inode>>>,
     pub(super) fs_event_subscriber_stats: FsEventSubscriberStats,
 }
 
@@ -172,6 +173,7 @@ impl SquashFs {
             decompress,
             anon_device_id,
             self_ref: weak_self.clone(),
+            inode_cache: RwMutex::new(BTreeMap::new()),
             fs_event_subscriber_stats: FsEventSubscriberStats::new(),
         });
 
@@ -185,17 +187,34 @@ impl SquashFs {
 
     /// Returns the root inode of the filesystem.
     pub(super) fn root_inode(&self) -> core::result::Result<Arc<dyn Inode>, Error> {
+        self.get_or_create_inode(self.root_inode_num)
+    }
+
+    /// Returns a cached inode, creating one if it is not already in the cache
+    /// or the previous instance has been dropped.
+    pub(super) fn get_or_create_inode(&self, ino: u32) -> core::result::Result<Arc<dyn Inode>, Error> {
+        if let Some(inode) = self.inode_cache.read().get(&ino).and_then(Weak::upgrade) {
+            return Ok(inode);
+        }
+
+        let mut cache = self.inode_cache.write();
+        if let Some(inode) = cache.get(&ino).and_then(Weak::upgrade) {
+            return Ok(inode);
+        }
+
         let parsed = self
             .inodes
-            .get(&self.root_inode_num)
-            .ok_or_else(|| Error::with_message(Errno::EIO, "root inode not found"))?;
-        Ok(SquashFsInode::new_inode(
+            .get(&ino)
+            .ok_or_else(|| Error::with_message(Errno::ENOENT, "inode not found"))?;
+        let inode = SquashFsInode::new_inode(
             parsed.meta.ino,
             parsed.body.clone(),
             parsed.meta.clone(),
             self.self_ref.clone(),
             self.container_device_id(),
-        ))
+        );
+        cache.insert(ino, Arc::downgrade(&inode));
+        Ok(inode)
     }
 }
 
