@@ -380,19 +380,7 @@ impl Inode for SquashFsInode {
             })
             .ok_or_else(|| Error::with_message(Errno::ENOENT, "entry not found"))?;
 
-        let child_ino = target_entry.inode_num;
-        let child_parsed = fs
-            .inodes
-            .get(&child_ino)
-            .ok_or_else(|| Error::with_message(Errno::ENOENT, "child inode not found"))?;
-
-        Ok(SquashFsInode::new_inode(
-            child_parsed.meta.ino,
-            child_parsed.body.clone(),
-            child_parsed.meta.clone(),
-            self.fs.clone(),
-            fs.container_device_id(),
-        ))
+        fs.get_or_create_inode(target_entry.inode_num)
     }
 
     fn link(&self, _old: &Arc<dyn Inode>, _name: &str) -> Result<()> {
