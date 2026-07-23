@@ -78,13 +78,9 @@ impl From<SquashfsError> for Error {
         let (errno, msg) = match e {
             SquashfsError::IoError => (Errno::EIO, "I/O error"),
             SquashfsError::InvalidMagic => (Errno::EINVAL, "invalid magic"),
-            SquashfsError::UnsupportedVersion(_, _) => {
-                (Errno::EINVAL, "unsupported version")
-            }
+            SquashfsError::UnsupportedVersion(_, _) => (Errno::EINVAL, "unsupported version"),
             SquashfsError::InvalidBlockSize(_) => (Errno::EINVAL, "invalid block size"),
-            SquashfsError::UnsupportedCompression(_) => {
-                (Errno::EINVAL, "unsupported compression")
-            }
+            SquashfsError::UnsupportedCompression(_) => (Errno::EINVAL, "unsupported compression"),
             SquashfsError::DecompressError => (Errno::EIO, "decompression error"),
             SquashfsError::CorruptedImage(detail) => (Errno::EIO, detail),
         };

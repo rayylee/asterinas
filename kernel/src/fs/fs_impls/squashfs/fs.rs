@@ -204,7 +204,10 @@ impl SquashFs {
 
     /// Returns a cached inode, creating one if it is not already in the cache
     /// or the previous instance has been dropped.
-    pub(super) fn get_or_create_inode(&self, ino: u32) -> core::result::Result<Arc<dyn Inode>, Error> {
+    pub(super) fn get_or_create_inode(
+        &self,
+        ino: u32,
+    ) -> core::result::Result<Arc<dyn Inode>, Error> {
         if let Some(inode) = self.inode_cache.read().get(&ino).and_then(Weak::upgrade) {
             return Ok(inode);
         }
