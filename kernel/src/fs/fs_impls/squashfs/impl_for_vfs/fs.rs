@@ -29,7 +29,7 @@ impl FileSystem for SquashFs {
     }
 
     fn root_inode(&self) -> Arc<dyn Inode> {
-        self.root_inode().unwrap()
+        self.root_inode()
     }
 
     fn sb(&self) -> SuperBlock {

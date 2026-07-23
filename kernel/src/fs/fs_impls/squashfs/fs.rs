@@ -12,6 +12,7 @@
 
 use aster_block::BlockDevice;
 use device_id::DeviceId;
+use spin::Once;
 
 use super::{
     SquashfsError,
@@ -54,6 +55,7 @@ pub(crate) struct SquashFs {
     pub(super) decompress: DecompressContext,
     anon_device_id: AnonDeviceId,
     self_ref: Weak<SquashFs>,
+    root_inode: Once<Arc<dyn Inode>>,
     inode_cache: RwMutex<BTreeMap<u32, Weak<dyn Inode>>>,
     pub(super) fs_event_subscriber_stats: FsEventSubscriberStats,
 }
@@ -173,9 +175,13 @@ impl SquashFs {
             decompress,
             anon_device_id,
             self_ref: weak_self.clone(),
+            root_inode: Once::new(),
             inode_cache: RwMutex::new(BTreeMap::new()),
             fs_event_subscriber_stats: FsEventSubscriberStats::new(),
         });
+
+        let root = fs.get_or_create_inode(fs.root_inode_num)?;
+        fs.root_inode.call_once(|| root);
 
         Ok(fs)
     }
@@ -186,8 +192,14 @@ impl SquashFs {
     }
 
     /// Returns the root inode of the filesystem.
-    pub(super) fn root_inode(&self) -> core::result::Result<Arc<dyn Inode>, Error> {
-        self.get_or_create_inode(self.root_inode_num)
+    ///
+    /// The root inode is eagerly created at mount time, so this always
+    /// returns a clone of the cached `Arc` without fallible operations.
+    pub(super) fn root_inode(&self) -> Arc<dyn Inode> {
+        self.root_inode
+            .get()
+            .expect("root inode must be initialised at mount time")
+            .clone()
     }
 
     /// Returns a cached inode, creating one if it is not already in the cache
