@@ -14,11 +14,12 @@
 //!
 //! The page cache uses [`SquashFsPageCacheBackend`] for on-demand page filling.
 
-use core::{ops::Deref, time::Duration};
+use core::{num::NonZeroUsize, ops::Deref, time::Duration};
 
 use aster_block::BlockDevice;
 use device_id::DeviceId;
 use io_util::batch::IoBatch;
+use lru::LruCache;
 use ostd::mm::{Segment, VmIo};
 use spin::Once;
 
@@ -315,6 +316,9 @@ impl Inode for SquashFsInode {
                 block_sizes: block_sizes.clone(),
                 fragments: fs.fragments.clone(),
                 file_size: *file_size as usize,
+                block_cache: Mutex::new(LruCache::new(
+                    NonZeroUsize::new(BLOCK_CACHE_CAPACITY).unwrap(),
+                )),
             }) as Arc<dyn PageCacheBackend>)
         });
         // Bail out early if the page cache backend hasn't been initialised.
@@ -613,8 +617,9 @@ impl FileReader<'_> {
 
 /// Page cache backend for regular files in Squashfs.
 ///
-/// Reads are forwarded to [`FileReader`] which handles block-level
-/// decompression and fragment access. Writes are rejected (read-only).
+/// Maintains an LRU cache of decompressed data blocks so that multiple
+/// 4 KB pages covered by the same compressed block (typically 128 KB)
+/// share a single disk-read + decompression. Writes are rejected (read-only).
 struct SquashFsPageCacheBackend {
     device: Arc<dyn BlockDevice>,
     decompress: DecompressContext,
@@ -625,6 +630,93 @@ struct SquashFsPageCacheBackend {
     block_sizes: Vec<BlockSizeInfo>,
     fragments: Vec<RawFragment>,
     file_size: usize,
+    /// LRU cache of decompressed blocks keyed by block index.
+    /// `usize::MAX` is reserved for the fragment block.
+    block_cache: Mutex<LruCache<usize, Arc<Vec<u8>>>>,
+}
+
+const BLOCK_CACHE_CAPACITY: usize = 8;
+const FRAGMENT_CACHE_KEY: usize = usize::MAX;
+
+impl SquashFsPageCacheBackend {
+    fn decompress_block(&self, block_idx: usize) -> Result<Arc<Vec<u8>>> {
+        let info = &self.block_sizes[block_idx];
+        let compressed_size = info.size as usize;
+
+        if compressed_size == 0 {
+            let bs = self.block_size as usize;
+            let file_bytes_left = self.file_size.saturating_sub(block_idx * bs);
+            return Ok(Arc::new(vec![0u8; bs.min(file_bytes_left)]));
+        }
+
+        let disk_pos = self.blocks_start
+            + self.block_sizes[..block_idx]
+                .iter()
+                .map(|b| b.size as u64)
+                .sum::<u64>();
+
+        let mut compressed = vec![0u8; compressed_size];
+        self.device
+            .read_bytes(disk_pos as usize, &mut compressed)
+            .map_err(|_| Error::with_message(Errno::EIO, "failed to read block"))?;
+
+        let data = if info.compressed {
+            let bs = self.block_size as usize;
+            let mut out = Vec::with_capacity(bs);
+            self.decompress
+                .decompress(&compressed, &mut out)
+                .map_err(|_| Error::with_message(Errno::EIO, "decompression failed"))?;
+            out.truncate(bs);
+            out
+        } else {
+            compressed
+        };
+        Ok(Arc::new(data))
+    }
+
+    fn decompress_fragment(&self) -> Result<Arc<Vec<u8>>> {
+        let frag = &self.fragments[self.frag_index as usize];
+        let frag_size = frag.size() as usize;
+
+        if frag_size == 0 {
+            return Ok(Arc::new(Vec::new()));
+        }
+
+        let mut raw = vec![0u8; frag_size];
+        self.device
+            .read_bytes(frag.start() as usize, &mut raw)
+            .map_err(|_| Error::with_message(Errno::EIO, "failed to read fragment"))?;
+
+        let data = if frag.is_compressed() {
+            let mut out = Vec::new();
+            self.decompress
+                .decompress(&raw, &mut out)
+                .map_err(|_| Error::with_message(Errno::EIO, "fragment decompression failed"))?;
+            out
+        } else {
+            raw
+        };
+        Ok(Arc::new(data))
+    }
+
+    fn get_or_decompress(&self, cache_key: usize) -> Result<Arc<Vec<u8>>> {
+        {
+            let mut cache = self.block_cache.lock();
+            if let Some(data) = cache.get(&cache_key) {
+                return Ok(data.clone());
+            }
+        }
+
+        let data = if cache_key == FRAGMENT_CACHE_KEY {
+            self.decompress_fragment()?
+        } else {
+            self.decompress_block(cache_key)?
+        };
+
+        let mut cache = self.block_cache.lock();
+        cache.put(cache_key, data.clone());
+        Ok(data)
+    }
 }
 
 impl PageCacheBackend for SquashFsPageCacheBackend {
@@ -647,27 +739,58 @@ impl PageCacheBackend for SquashFsPageCacheBackend {
         }
 
         let read_len = PAGE_SIZE.min(self.file_size - offset);
+        let bs = self.block_size as usize;
+        let nblocks = self.block_sizes.len();
+
+        let mut buf = vec![0u8; PAGE_SIZE];
+        let mut buf_pos = 0;
+        let mut file_pos = offset;
+
+        while buf_pos < read_len {
+            let cur_block = file_pos / bs;
+            let in_fragment = cur_block >= nblocks;
+
+            if in_fragment {
+                if self.frag_index == INVALID_FRAG
+                    || self.frag_index >= self.fragments.len() as u32
+                {
+                    break;
+                }
+                let frag_data = self.get_or_decompress(FRAGMENT_CACHE_KEY)?;
+                let bytes_before_frag = nblocks * bs;
+                let bo = self.block_offset as usize;
+                let frag_file_offset = file_pos - bytes_before_frag;
+                let src_start = bo + frag_file_offset;
+                let frag_avail = frag_data.len().saturating_sub(src_start);
+                let file_avail = self.file_size.saturating_sub(file_pos);
+                let to_copy = (read_len - buf_pos).min(frag_avail).min(file_avail);
+                if to_copy > 0 && src_start + to_copy <= frag_data.len() {
+                    buf[buf_pos..buf_pos + to_copy]
+                        .copy_from_slice(&frag_data[src_start..src_start + to_copy]);
+                }
+                buf_pos += to_copy;
+                break;
+            }
+
+            let block_data = self.get_or_decompress(cur_block)?;
+            let block_start_byte = cur_block * bs;
+            let in_block_off = file_pos - block_start_byte;
+            let file_avail = self.file_size.saturating_sub(file_pos);
+            let block_avail = block_data.len().saturating_sub(in_block_off);
+            let to_copy = (read_len - buf_pos).min(block_avail).min(file_avail);
+            if to_copy > 0 {
+                buf[buf_pos..buf_pos + to_copy]
+                    .copy_from_slice(&block_data[in_block_off..in_block_off + to_copy]);
+            }
+            buf_pos += to_copy;
+            file_pos += to_copy;
+        }
+
+        if buf_pos != read_len {
+            return_errno_with_message!(Errno::EIO, "short read from SquashFS file data");
+        }
 
         let seg = Segment::from(locked_page.deref().clone());
-        let mut buf = vec![0u8; PAGE_SIZE];
-        {
-            let mut writer = VmWriter::from(&mut buf[..read_len]).to_fallible();
-            let reader = FileReader {
-                device: &self.device,
-                decompress: &self.decompress,
-                blocks_start: self.blocks_start,
-                frag_index: self.frag_index,
-                block_offset: self.block_offset,
-                block_size: self.block_size,
-                block_sizes: &self.block_sizes,
-                fragments: &self.fragments,
-                file_size: self.file_size,
-            };
-            let n = reader.read(offset, read_len, &mut writer)?;
-            if n != read_len {
-                return_errno_with_message!(Errno::EIO, "short read from SquashFS file data");
-            }
-        }
         seg.write_bytes(0, &buf)
             .map_err(|_| Error::with_message(Errno::EIO, "failed to write page"))?;
 
