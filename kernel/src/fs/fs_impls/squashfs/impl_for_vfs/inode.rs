@@ -628,6 +628,8 @@ struct SquashFsPageCacheBackend {
 }
 
 impl PageCacheBackend for SquashFsPageCacheBackend {
+    // TODO: Synchronous — `io_batch` unused. The page cache read path
+    // waits per-page anyway; async gains require batched readahead.
     fn read_page_async(
         &self,
         idx: usize,
