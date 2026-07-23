@@ -433,6 +433,8 @@ impl Inode for SquashFsInode {
     }
 
     fn fs(&self) -> Arc<dyn FileSystem> {
+        // Safe: inodes are only reachable while the filesystem is mounted,
+        // which keeps the `Arc<SquashFs>` alive.
         self.fs().unwrap()
     }
 
