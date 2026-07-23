@@ -509,38 +509,16 @@ impl FileReader<'_> {
 
         for block_idx in start_block..end_block.min(nblocks) {
             let block_start_byte = block_idx * bs;
-            let info = &self.block_sizes[block_idx];
-            let compressed_size = info.size as usize;
-
-            // A block with on-disk size 0 is a sparse block (all zeros).
-            // SquashFS omits such blocks entirely to save disk space.
-            if compressed_size == 0 {
-                let remain = writer.avail();
-                let file_bytes_left = self.file_size.saturating_sub(block_start_byte);
-                let valid_block_len = bs.min(file_bytes_left);
-                let block_off = offset.saturating_sub(block_start_byte);
-                let to_copy = valid_block_len.saturating_sub(block_off).min(remain);
-                let copied = writer.fill_zeros(to_copy).unwrap_or_else(|(_, n)| n);
-                total_written += copied;
-                continue;
-            }
-
-            let mut compressed = vec![0u8; compressed_size];
-            self.device
-                .read_bytes(disk_pos as usize, &mut compressed)
-                .map_err(|_| Error::with_message(Errno::EIO, "failed to read block"))?;
-            disk_pos += compressed_size as u64;
-
-            let block_data = if info.compressed {
-                let mut out = Vec::with_capacity(bs);
-                self.decompress
-                    .decompress(&compressed, &mut out)
-                    .map_err(|_| Error::with_message(Errno::EIO, "decompression failed"))?;
-                out.truncate(bs);
-                out
-            } else {
-                compressed
-            };
+            let block_data = decompress_raw_block_data(
+                &**self.device,
+                self.decompress,
+                disk_pos,
+                self.block_sizes,
+                self.block_size,
+                self.file_size,
+                block_idx,
+            )?;
+            disk_pos += self.block_sizes[block_idx].size as u64;
 
             let remain = writer.avail();
             let file_bytes_left = self.file_size.saturating_sub(block_start_byte);
@@ -561,30 +539,12 @@ impl FileReader<'_> {
             && self.frag_index != INVALID_FRAG
             && self.frag_index < self.fragments.len() as u32
         {
-            let frag = &self.fragments[self.frag_index as usize];
-            let frag_size = frag.size() as usize;
-
-            let frag_compressed = if frag_size > 0 {
-                let mut buf = vec![0u8; frag_size];
-                self.device
-                    .read_bytes(frag.start() as usize, &mut buf)
-                    .map_err(|_| Error::with_message(Errno::EIO, "failed to read fragment"))?;
-                buf
-            } else {
-                Vec::new()
-            };
-
-            let full_frag_data = if frag.is_compressed() {
-                let mut out = Vec::new();
-                self.decompress
-                    .decompress(&frag_compressed, &mut out)
-                    .map_err(|_| {
-                        Error::with_message(Errno::EIO, "fragment decompression failed")
-                    })?;
-                out
-            } else {
-                frag_compressed
-            };
+            let full_frag_data = decompress_raw_fragment_data(
+                &**self.device,
+                self.decompress,
+                self.fragments,
+                self.frag_index,
+            )?;
 
             let bytes_before_frag = nblocks * bs;
             let bo = self.block_offset as usize;
@@ -638,87 +598,6 @@ struct SquashFsPageCacheBackend {
 const BLOCK_CACHE_CAPACITY: usize = 8;
 const FRAGMENT_CACHE_KEY: usize = usize::MAX;
 
-impl SquashFsPageCacheBackend {
-    fn decompress_block(&self, block_idx: usize) -> Result<Arc<Vec<u8>>> {
-        let info = &self.block_sizes[block_idx];
-        let compressed_size = info.size as usize;
-
-        if compressed_size == 0 {
-            let bs = self.block_size as usize;
-            let file_bytes_left = self.file_size.saturating_sub(block_idx * bs);
-            return Ok(Arc::new(vec![0u8; bs.min(file_bytes_left)]));
-        }
-
-        let disk_pos = self.blocks_start
-            + self.block_sizes[..block_idx]
-                .iter()
-                .map(|b| b.size as u64)
-                .sum::<u64>();
-
-        let mut compressed = vec![0u8; compressed_size];
-        self.device
-            .read_bytes(disk_pos as usize, &mut compressed)
-            .map_err(|_| Error::with_message(Errno::EIO, "failed to read block"))?;
-
-        let data = if info.compressed {
-            let bs = self.block_size as usize;
-            let mut out = Vec::with_capacity(bs);
-            self.decompress
-                .decompress(&compressed, &mut out)
-                .map_err(|_| Error::with_message(Errno::EIO, "decompression failed"))?;
-            out.truncate(bs);
-            out
-        } else {
-            compressed
-        };
-        Ok(Arc::new(data))
-    }
-
-    fn decompress_fragment(&self) -> Result<Arc<Vec<u8>>> {
-        let frag = &self.fragments[self.frag_index as usize];
-        let frag_size = frag.size() as usize;
-
-        if frag_size == 0 {
-            return Ok(Arc::new(Vec::new()));
-        }
-
-        let mut raw = vec![0u8; frag_size];
-        self.device
-            .read_bytes(frag.start() as usize, &mut raw)
-            .map_err(|_| Error::with_message(Errno::EIO, "failed to read fragment"))?;
-
-        let data = if frag.is_compressed() {
-            let mut out = Vec::new();
-            self.decompress
-                .decompress(&raw, &mut out)
-                .map_err(|_| Error::with_message(Errno::EIO, "fragment decompression failed"))?;
-            out
-        } else {
-            raw
-        };
-        Ok(Arc::new(data))
-    }
-
-    fn get_or_decompress(&self, cache_key: usize) -> Result<Arc<Vec<u8>>> {
-        {
-            let mut cache = self.block_cache.lock();
-            if let Some(data) = cache.get(&cache_key) {
-                return Ok(data.clone());
-            }
-        }
-
-        let data = if cache_key == FRAGMENT_CACHE_KEY {
-            self.decompress_fragment()?
-        } else {
-            self.decompress_block(cache_key)?
-        };
-
-        let mut cache = self.block_cache.lock();
-        cache.put(cache_key, data.clone());
-        Ok(data)
-    }
-}
-
 impl PageCacheBackend for SquashFsPageCacheBackend {
     // TODO: Synchronous — `io_batch` unused. The page cache read path
     // waits per-page anyway; async gains require batched readahead.
@@ -751,8 +630,7 @@ impl PageCacheBackend for SquashFsPageCacheBackend {
             let in_fragment = cur_block >= nblocks;
 
             if in_fragment {
-                if self.frag_index == INVALID_FRAG
-                    || self.frag_index >= self.fragments.len() as u32
+                if self.frag_index == INVALID_FRAG || self.frag_index >= self.fragments.len() as u32
                 {
                     break;
                 }
@@ -806,4 +684,122 @@ impl PageCacheBackend for SquashFsPageCacheBackend {
     ) -> Result<()> {
         return_errno_with_message!(Errno::EROFS, "SquashFS is read-only")
     }
+}
+
+impl SquashFsPageCacheBackend {
+    fn get_or_decompress(&self, cache_key: usize) -> Result<Arc<Vec<u8>>> {
+        {
+            let mut cache = self.block_cache.lock();
+            if let Some(data) = cache.get(&cache_key) {
+                return Ok(data.clone());
+            }
+        }
+
+        let data = if cache_key == FRAGMENT_CACHE_KEY {
+            Arc::new(decompress_raw_fragment_data(
+                &*self.device,
+                &self.decompress,
+                &self.fragments,
+                self.frag_index,
+            )?)
+        } else {
+            let disk_pos = self.blocks_start
+                + self.block_sizes[..cache_key]
+                    .iter()
+                    .map(|b| b.size as u64)
+                    .sum::<u64>();
+            Arc::new(decompress_raw_block_data(
+                &*self.device,
+                &self.decompress,
+                disk_pos,
+                &self.block_sizes,
+                self.block_size,
+                self.file_size,
+                cache_key,
+            )?)
+        };
+
+        let mut cache = self.block_cache.lock();
+        cache.put(cache_key, data.clone());
+        Ok(data)
+    }
+}
+
+/// Decompresses a single data block.
+///
+/// Returns the decompressed block data. Sparse blocks (size 0) return
+/// a zero-filled vector of the appropriate length.
+fn decompress_raw_block_data(
+    device: &dyn BlockDevice,
+    decompress: &DecompressContext,
+    disk_pos: u64,
+    block_sizes: &[BlockSizeInfo],
+    block_size: u32,
+    file_size: usize,
+    block_idx: usize,
+) -> Result<Vec<u8>> {
+    let info = block_sizes
+        .get(block_idx)
+        .ok_or_else(|| Error::with_message(Errno::EIO, "block index out of bounds"))?;
+    let compressed_size = info.size as usize;
+
+    if compressed_size == 0 {
+        let bs = block_size as usize;
+        let file_bytes_left = file_size.saturating_sub(block_idx * bs);
+        return Ok(vec![0u8; bs.min(file_bytes_left)]);
+    }
+
+    let mut compressed = vec![0u8; compressed_size];
+    device
+        .read_bytes(disk_pos as usize, &mut compressed)
+        .map_err(|_| Error::with_message(Errno::EIO, "failed to read block"))?;
+
+    let data = if info.compressed {
+        let bs = block_size as usize;
+        let mut out = Vec::with_capacity(bs);
+        decompress
+            .decompress(&compressed, &mut out)
+            .map_err(|_| Error::with_message(Errno::EIO, "decompression failed"))?;
+        out.truncate(bs);
+        out
+    } else {
+        compressed
+    };
+    Ok(data)
+}
+
+/// Decompresses a fragment block.
+///
+/// Returns the full decompressed fragment data (which may be shared
+/// among multiple files). Returns an empty vec for zero-size fragments.
+fn decompress_raw_fragment_data(
+    device: &dyn BlockDevice,
+    decompress: &DecompressContext,
+    fragments: &[RawFragment],
+    frag_index: u32,
+) -> Result<Vec<u8>> {
+    let frag = fragments
+        .get(frag_index as usize)
+        .ok_or_else(|| Error::with_message(Errno::EIO, "fragment index out of bounds"))?;
+    let frag_size = frag.size() as usize;
+
+    if frag_size == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut raw = vec![0u8; frag_size];
+    device
+        .read_bytes(frag.start() as usize, &mut raw)
+        .map_err(|_| Error::with_message(Errno::EIO, "failed to read fragment"))?;
+
+    let data = if frag.is_compressed() {
+        let mut out = Vec::new();
+        decompress
+            .decompress(&raw, &mut out)
+            .map_err(|_| Error::with_message(Errno::EIO, "fragment decompression failed"))?;
+        out
+    } else {
+        raw
+    };
+    Ok(data)
 }
