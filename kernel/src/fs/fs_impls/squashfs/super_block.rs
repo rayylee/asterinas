@@ -12,9 +12,6 @@ use ostd::{const_assert, mm::VmIo};
 use super::compressor::Compressor;
 use crate::prelude::*;
 
-/// Size of the Squashfs superblock in bytes.
-const SUPERBLOCK_SIZE: usize = 96;
-
 /// Squashfs magic number ("hsqs" as little-endian u32).
 ///
 /// Reference:
@@ -79,7 +76,7 @@ struct RawSuperBlock {
     export_table: u64,
 }
 
-const_assert!(size_of::<RawSuperBlock>() == SUPERBLOCK_SIZE);
+const_assert!(size_of::<RawSuperBlock>() == 96);
 
 impl SuperBlock {
     /// Reads and validates the superblock from the block device at the given offset.
