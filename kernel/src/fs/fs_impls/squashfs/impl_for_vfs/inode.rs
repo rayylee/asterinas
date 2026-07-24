@@ -5,14 +5,10 @@
 //! Wires the Squashfs inode into the VFS layer by implementing
 //! [`FileOps`], [`Inode`], and [`PageCacheBackend`] traits.
 //!
-//! # File data reading
-//!
-//! Regular file data is read via the [`FileReader`] struct, which handles:
-//! - Reading and decompressing individual data blocks
-//! - Reading tail-end fragment blocks
-//! - Sparse block handling (zero-fill for blocks with size 0)
-//!
-//! The page cache uses [`SquashFsPageCacheBackend`] for on-demand page filling.
+//! Regular file reads go through the page cache. [`SquashFsPageCacheBackend`]
+//! fills each 4 KB page on demand by decompressing the containing squashfs
+//! block (typically 128 KB). An LRU block cache avoids re-decompressing the
+//! same block for adjacent pages.
 
 use core::{num::NonZeroUsize, ops::Deref, time::Duration};
 
@@ -58,10 +54,7 @@ pub(crate) struct SquashFsInode {
     fs: Weak<SquashFs>,
     extension: Extension,
     container_dev_id: DeviceId,
-    /// Lazily-created page cache for regular files.
-    page_cache: Once<Option<PageCache>>,
-    /// Lazily-created page cache backend for regular files.
-    page_cache_backend: Once<Option<Arc<dyn PageCacheBackend>>>,
+    page_cache: Once<Option<(Arc<SquashFsPageCacheBackend>, PageCache)>>,
 }
 
 impl SquashFsInode {
@@ -80,7 +73,6 @@ impl SquashFsInode {
             extension: Extension::new(),
             container_dev_id,
             page_cache: Once::new(),
-            page_cache_backend: Once::new(),
         })
     }
 
@@ -113,6 +105,7 @@ impl Debug for SquashFsInode {
 }
 
 impl FileOps for SquashFsInode {
+    // `O_DIRECT is intentionally ignored — squashfs stores data compressed on disk.
     fn read_at(
         &self,
         offset: usize,
@@ -123,37 +116,20 @@ impl FileOps for SquashFsInode {
         if offset >= size {
             return Ok(0);
         }
-
         let read_len = writer.avail().min(size - offset);
         if read_len == 0 {
             return Ok(0);
         }
-
-        let fs = self.fs()?;
-
-        match &self.body {
-            InodeBody::File {
-                blocks_start,
-                frag_index,
-                block_offset,
-                file_size: _,
-                block_sizes,
-            } => {
-                let reader = FileReader {
-                    device: &fs.device,
-                    decompress: &fs.decompress,
-                    blocks_start: *blocks_start,
-                    frag_index: *frag_index,
-                    block_offset: *block_offset,
-                    block_size: fs.super_block.block_size,
-                    block_sizes,
-                    fragments: &fs.fragments,
-                    file_size: size,
-                };
-                reader.read(offset, read_len, writer)
-            }
-            _ => Ok(0),
-        }
+        let Some(page_cache) = self.page_cache() else {
+            return Ok(0);
+        };
+        let mut limited_writer = writer.clone_exclusive();
+        limited_writer.limit(read_len);
+        page_cache
+            .read(offset, &mut limited_writer)
+            .map_err(|_| Error::with_message(Errno::EIO, "page cache read failed"))?;
+        writer.skip(read_len);
+        Ok(read_len)
     }
 
     fn write_at(
@@ -304,9 +280,9 @@ impl Inode for SquashFsInode {
             return None;
         }
 
-        let backend_opt = self.page_cache_backend.call_once(|| {
+        let pair = self.page_cache.call_once(|| {
             let fs = self.fs().ok()?;
-            Some(Arc::new(SquashFsPageCacheBackend {
+            let backend = Arc::new(SquashFsPageCacheBackend {
                 device: fs.device.clone(),
                 decompress: fs.decompress,
                 blocks_start: *blocks_start,
@@ -319,16 +295,15 @@ impl Inode for SquashFsInode {
                 block_cache: Mutex::new(LruCache::new(
                     NonZeroUsize::new(BLOCK_CACHE_CAPACITY).unwrap(),
                 )),
-            }) as Arc<dyn PageCacheBackend>)
+            });
+            let cache = {
+                let backend_dyn: Arc<dyn PageCacheBackend> = backend.clone();
+                PageCache::new_with_backend(*file_size as usize, Arc::downgrade(&backend_dyn))
+                    .ok()?
+            };
+            Some((backend, cache))
         });
-        // Bail out early if the page cache backend hasn't been initialised.
-        let _backend = backend_opt.as_ref()?;
-
-        let pg_cache_opt = self.page_cache.call_once(|| {
-            let backend = self.page_cache_backend.get().unwrap().as_ref()?;
-            PageCache::new_with_backend(*file_size as usize, Arc::downgrade(backend)).ok()
-        });
-        pg_cache_opt.clone()
+        pair.as_ref().map(|(_, cache)| cache.clone())
     }
 
     fn open(
@@ -457,121 +432,6 @@ fn squash_inodeid_to_vfs_type(id: InodeId) -> InodeType {
         InodeId::BasicCharacterDevice => InodeType::CharDevice,
         InodeId::BasicNamedPipe => InodeType::NamedPipe,
         InodeId::BasicSocket => InodeType::Socket,
-    }
-}
-
-/// Holds all file metadata needed to read data blocks from a Squashfs file.
-///
-/// Regular files in Squashfs consist of a sequence of contiguous compressed
-/// blocks on disk, optionally followed by a tail-end fragment. Data blocks
-/// may be sparse (size 0 bytes, meaning the block is all zeroes).
-struct FileReader<'a> {
-    device: &'a Arc<dyn BlockDevice>,
-    decompress: &'a DecompressContext,
-    /// On-disk offset of the first data block.
-    blocks_start: u64,
-    /// Index into the fragment table, or `INVALID_FRAG` if no fragment.
-    frag_index: u32,
-    /// Byte offset of this file's data within the fragment block.
-    block_offset: u32,
-    /// Data block size in bytes.
-    block_size: u32,
-    /// Per-block size and compression info.
-    block_sizes: &'a [BlockSizeInfo],
-    /// Fragment table entries.
-    fragments: &'a [RawFragment],
-    /// Uncompressed file size in bytes.
-    file_size: usize,
-}
-
-impl FileReader<'_> {
-    /// Reads a range of bytes from the file into the writer.
-    ///
-    /// Handles:
-    /// - Sparse blocks (size 0): fills with zeroes
-    /// - Compressed blocks: reads from disk and decompresses
-    /// - Uncompressed blocks: reads raw data from disk
-    /// - Fragment blocks: reads and optionally decompresses the tail-end fragment
-    fn read(&self, offset: usize, read_len: usize, writer: &mut VmWriter) -> Result<usize> {
-        let bs = self.block_size as usize;
-        let start_block = offset / bs;
-        let end_byte = offset + read_len;
-        let end_block = end_byte.div_ceil(bs);
-        let nblocks = self.block_sizes.len();
-
-        let mut total_written = 0;
-
-        let mut disk_pos = self.blocks_start
-            + self.block_sizes[..start_block]
-                .iter()
-                .map(|b| b.size as u64)
-                .sum::<u64>();
-
-        for block_idx in start_block..end_block.min(nblocks) {
-            let block_start_byte = block_idx * bs;
-            let block_data = decompress_raw_block_data(
-                &**self.device,
-                self.decompress,
-                disk_pos,
-                self.block_sizes,
-                self.block_size,
-                self.file_size,
-                block_idx,
-            )?;
-            disk_pos += self.block_sizes[block_idx].size as u64;
-
-            let remain = writer.avail();
-            let file_bytes_left = self.file_size.saturating_sub(block_start_byte);
-            let valid_block_len = block_data.len().min(file_bytes_left);
-            let block_off = offset.saturating_sub(block_start_byte);
-            let start = block_off.min(valid_block_len);
-            let to_copy = valid_block_len.saturating_sub(start).min(remain);
-            if to_copy > 0 {
-                let mut reader = VmReader::from(&block_data[start..start + to_copy]);
-                let copied = writer
-                    .write_fallible(&mut reader)
-                    .unwrap_or_else(|(_, n)| n);
-                total_written += copied;
-            }
-        }
-
-        if end_block > nblocks
-            && self.frag_index != INVALID_FRAG
-            && self.frag_index < self.fragments.len() as u32
-        {
-            let full_frag_data = decompress_raw_fragment_data(
-                &**self.device,
-                self.decompress,
-                self.fragments,
-                self.frag_index,
-            )?;
-
-            let bytes_before_frag = nblocks * bs;
-            let bo = self.block_offset as usize;
-            let file_frag_len = if bo < full_frag_data.len() {
-                full_frag_data
-                    .len()
-                    .saturating_sub(bo)
-                    .min(self.file_size.saturating_sub(bytes_before_frag))
-            } else {
-                0
-            };
-            let frag_read_offset = offset.saturating_sub(bytes_before_frag);
-            let remain = writer.avail();
-            let to_copy = file_frag_len.saturating_sub(frag_read_offset).min(remain);
-            if to_copy > 0 {
-                let start = bo + frag_read_offset.min(file_frag_len);
-                if start + to_copy <= full_frag_data.len() {
-                    let mut reader = VmReader::from(&full_frag_data[start..start + to_copy]);
-                    let copied = writer
-                        .write_fallible(&mut reader)
-                        .unwrap_or_else(|(_, n)| n);
-                    total_written += copied;
-                }
-            }
-        }
-
-        Ok(total_written)
     }
 }
 
