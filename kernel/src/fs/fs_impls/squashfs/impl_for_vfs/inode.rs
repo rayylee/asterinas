@@ -7,22 +7,21 @@
 //!
 //! Regular file reads go through the page cache. [`SquashFsPageCacheBackend`]
 //! fills each 4 KB page on demand by decompressing the containing squashfs
-//! block (typically 128 KB). An LRU block cache avoids re-decompressing the
-//! same block for adjacent pages.
+//! block (typically 128 KB). Decompressed blocks are cached in a global
+//! LRU cache shared across all file inodes.
 
-use core::{num::NonZeroUsize, ops::Deref, time::Duration};
+use core::{ops::Deref, time::Duration};
 
 use aster_block::BlockDevice;
 use device_id::DeviceId;
 use io_util::batch::IoBatch;
-use lru::LruCache;
 use ostd::mm::{Segment, VmIo};
 use spin::Once;
 
 use super::super::{
     SquashFs,
     compressor::DecompressContext,
-    fragment::RawFragment,
+    fragment::FragmentEntry,
     inode::{BlockSizeInfo, INVALID_FRAG, InodeBody, InodeId, InodeMeta},
 };
 use crate::{
@@ -283,18 +282,14 @@ impl Inode for SquashFsInode {
         let pair = self.page_cache.call_once(|| {
             let fs = self.fs().ok()?;
             let backend = Arc::new(SquashFsPageCacheBackend {
-                device: fs.device.clone(),
-                decompress: fs.decompress,
+                fs: self.fs.clone(),
+                ino: self.ino,
                 blocks_start: *blocks_start,
                 frag_index: *frag_index,
                 block_offset: *block_offset,
                 block_size: fs.super_block.block_size,
                 block_sizes: block_sizes.clone(),
-                fragments: fs.fragments.clone(),
                 file_size: *file_size as usize,
-                block_cache: Mutex::new(LruCache::new(
-                    NonZeroUsize::new(BLOCK_CACHE_CAPACITY).unwrap(),
-                )),
             });
             let cache = {
                 let backend_dyn: Arc<dyn PageCacheBackend> = backend.clone();
@@ -437,26 +432,28 @@ fn squash_inodeid_to_vfs_type(id: InodeId) -> InodeType {
 
 /// Page cache backend for regular files in Squashfs.
 ///
-/// Maintains an LRU cache of decompressed data blocks so that multiple
-/// 4 KB pages covered by the same compressed block (typically 128 KB)
-/// share a single disk-read + decompression. Writes are rejected (read-only).
+/// Each backend holds the per-file metadata needed to locate compressed
+/// blocks on disk (block list, fragment reference, etc.) and a weak
+/// reference to the owning [`SquashFs`] filesystem. Decompressed blocks
+/// are cached in the **global** LRU cache on `SquashFs`, shared across
+/// all file inodes, so:
+/// - The same fragment block is not decompressed redundantly for every
+///   file that references it.
+/// - Total memory for decompressed data is bounded by the global cache
+///   capacity rather than growing with the number of open files.
 struct SquashFsPageCacheBackend {
-    device: Arc<dyn BlockDevice>,
-    decompress: DecompressContext,
+    /// Weak reference to the owning filesystem — provides the block device,
+    /// decompression context, fragment table, and global block cache.
+    fs: Weak<SquashFs>,
+    /// Inode number, used as part of the global cache key for data blocks.
+    ino: u32,
     blocks_start: u64,
     frag_index: u32,
     block_offset: u32,
     block_size: u32,
     block_sizes: Vec<BlockSizeInfo>,
-    fragments: Vec<RawFragment>,
     file_size: usize,
-    /// LRU cache of decompressed blocks keyed by block index.
-    /// `usize::MAX` is reserved for the fragment block.
-    block_cache: Mutex<LruCache<usize, Arc<Vec<u8>>>>,
 }
-
-const BLOCK_CACHE_CAPACITY: usize = 8;
-const FRAGMENT_CACHE_KEY: usize = usize::MAX;
 
 impl PageCacheBackend for SquashFsPageCacheBackend {
     // TODO: Synchronous — `io_batch` unused. The page cache read path
@@ -477,6 +474,11 @@ impl PageCacheBackend for SquashFsPageCacheBackend {
             ));
         }
 
+        let fs = self
+            .fs
+            .upgrade()
+            .ok_or_else(|| Error::with_message(Errno::EIO, "filesystem is unmounted"))?;
+
         let read_len = PAGE_SIZE.min(self.file_size - offset);
         let bs = self.block_size as usize;
         let nblocks = self.block_sizes.len();
@@ -490,11 +492,10 @@ impl PageCacheBackend for SquashFsPageCacheBackend {
             let in_fragment = cur_block >= nblocks;
 
             if in_fragment {
-                if self.frag_index == INVALID_FRAG || self.frag_index >= self.fragments.len() as u32
-                {
+                if self.frag_index == INVALID_FRAG || self.frag_index >= fs.fragments.len() as u32 {
                     break;
                 }
-                let frag_data = self.get_or_decompress(FRAGMENT_CACHE_KEY)?;
+                let frag_data = fs.get_or_decompress_fragment_block(self.frag_index)?;
                 let bytes_before_frag = nblocks * bs;
                 let bo = self.block_offset as usize;
                 let frag_file_offset = file_pos - bytes_before_frag;
@@ -510,7 +511,13 @@ impl PageCacheBackend for SquashFsPageCacheBackend {
                 break;
             }
 
-            let block_data = self.get_or_decompress(cur_block)?;
+            let block_data = fs.get_or_decompress_data_block(
+                self.ino,
+                cur_block,
+                self.blocks_start,
+                &self.block_sizes,
+                self.file_size,
+            )?;
             let block_start_byte = cur_block * bs;
             let in_block_off = file_pos - block_start_byte;
             let file_avail = self.file_size.saturating_sub(file_pos);
@@ -546,50 +553,11 @@ impl PageCacheBackend for SquashFsPageCacheBackend {
     }
 }
 
-impl SquashFsPageCacheBackend {
-    fn get_or_decompress(&self, cache_key: usize) -> Result<Arc<Vec<u8>>> {
-        {
-            let mut cache = self.block_cache.lock();
-            if let Some(data) = cache.get(&cache_key) {
-                return Ok(data.clone());
-            }
-        }
-
-        let data = if cache_key == FRAGMENT_CACHE_KEY {
-            Arc::new(decompress_raw_fragment_data(
-                &*self.device,
-                &self.decompress,
-                &self.fragments,
-                self.frag_index,
-            )?)
-        } else {
-            let disk_pos = self.blocks_start
-                + self.block_sizes[..cache_key]
-                    .iter()
-                    .map(|b| b.size as u64)
-                    .sum::<u64>();
-            Arc::new(decompress_raw_block_data(
-                &*self.device,
-                &self.decompress,
-                disk_pos,
-                &self.block_sizes,
-                self.block_size,
-                self.file_size,
-                cache_key,
-            )?)
-        };
-
-        let mut cache = self.block_cache.lock();
-        cache.put(cache_key, data.clone());
-        Ok(data)
-    }
-}
-
 /// Decompresses a single data block.
 ///
 /// Returns the decompressed block data. Sparse blocks (size 0) return
 /// a zero-filled vector of the appropriate length.
-fn decompress_raw_block_data(
+pub(in crate::fs::fs_impls::squashfs) fn decompress_raw_block_data(
     device: &dyn BlockDevice,
     decompress: &DecompressContext,
     disk_pos: u64,
@@ -632,16 +600,16 @@ fn decompress_raw_block_data(
 ///
 /// Returns the full decompressed fragment data (which may be shared
 /// among multiple files). Returns an empty vec for zero-size fragments.
-fn decompress_raw_fragment_data(
+pub(in crate::fs::fs_impls::squashfs) fn decompress_raw_fragment_data(
     device: &dyn BlockDevice,
     decompress: &DecompressContext,
-    fragments: &[RawFragment],
+    fragments: &[FragmentEntry],
     frag_index: u32,
 ) -> Result<Vec<u8>> {
     let frag = fragments
         .get(frag_index as usize)
         .ok_or_else(|| Error::with_message(Errno::EIO, "fragment index out of bounds"))?;
-    let frag_size = frag.size() as usize;
+    let frag_size = frag.size as usize;
 
     if frag_size == 0 {
         return Ok(Vec::new());
@@ -649,10 +617,10 @@ fn decompress_raw_fragment_data(
 
     let mut raw = vec![0u8; frag_size];
     device
-        .read_bytes(frag.start() as usize, &mut raw)
+        .read_bytes(frag.start as usize, &mut raw)
         .map_err(|_| Error::with_message(Errno::EIO, "failed to read fragment"))?;
 
-    let data = if frag.is_compressed() {
+    let data = if frag.compressed {
         let mut out = Vec::new();
         decompress
             .decompress(&raw, &mut out)

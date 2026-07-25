@@ -14,7 +14,7 @@
 use aster_block::BlockDevice;
 use ostd::mm::VmIo;
 
-use super::{SquashfsError, compressor::DecompressContext, fragment::RawFragment, types};
+use super::{SquashfsError, compressor::DecompressContext, types};
 use crate::prelude::*;
 
 /// Bit 15 of the metadata header: 1 = uncompressed, 0 = compressed.
@@ -134,25 +134,6 @@ pub(super) fn read_id_table(
     Ok(ids)
 }
 
-/// Reads the fragment table.
-///
-/// Each entry is a 16-byte on-disk `RawFragment` describing
-/// the location and size of a tail-end packed fragment block.
-pub(super) fn read_fragment_table(
-    device: &Arc<dyn BlockDevice>,
-    table_pos: u64,
-    frag_count: u32,
-    decompress: &DecompressContext,
-) -> Result<Vec<RawFragment>, SquashfsError> {
-    RawFragment::from_raw_bytes(&read_lookup_table_raw(
-        device,
-        table_pos,
-        16,
-        frag_count as u64,
-        decompress,
-    )?)
-}
-
 /// Reads a lookup table (ID, fragment, or export table).
 ///
 /// Delegates to [`read_lookup_table_raw`] for the raw bytes, then applies
@@ -174,7 +155,7 @@ fn read_lookup_table<T>(
 /// The on-disk layout at `table_pos` is:
 /// - `block_count` consecutive u64 pointers, each pointing to an independent
 ///   metadata block. The metadata blocks are **not** necessarily contiguous.
-fn read_lookup_table_raw(
+pub(super) fn read_lookup_table_raw(
     device: &Arc<dyn BlockDevice>,
     table_pos: u64,
     entry_size: usize,

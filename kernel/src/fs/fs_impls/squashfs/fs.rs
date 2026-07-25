@@ -10,17 +10,20 @@
 //! read and decompressed at mount time. File data is read on-demand
 //! through the page cache.
 
+use core::num::NonZeroUsize;
+
 use aster_block::BlockDevice;
 use device_id::DeviceId;
+use lru::LruCache;
 use spin::Once;
 
 use super::{
     SquashfsError,
     compressor::DecompressContext,
     dir::{self, SquashDirEntry},
-    fragment::RawFragment,
-    impl_for_vfs::inode::SquashFsInode,
-    inode::{self, InodeBody, ParsedInode},
+    fragment::{self, FragmentEntry},
+    impl_for_vfs::inode::{SquashFsInode, decompress_raw_block_data, decompress_raw_fragment_data},
+    inode::{self, BlockSizeInfo, InodeBody, ParsedInode},
     metadata,
     super_block::SuperBlock,
 };
@@ -45,19 +48,52 @@ const INVALID_BLK: u64 = 0xffffffffffffffff;
 ///
 /// All inode and directory metadata is eagerly loaded into `inodes`
 /// and `dir_entries` at mount time. File data is read on-demand.
+///
+/// The global `block_cache` holds recently decompressed data blocks
+/// and fragment blocks, shared across all file inodes. This avoids
+/// per-inode duplication and provides a system-wide memory bound.
 pub(crate) struct SquashFs {
-    pub(super) device: Arc<dyn BlockDevice>,
+    device: Arc<dyn BlockDevice>,
     pub(super) super_block: SuperBlock,
     pub(super) inodes: BTreeMap<u32, ParsedInode>,
     pub(super) dir_entries: BTreeMap<u32, Vec<SquashDirEntry>>,
-    pub(super) fragments: Vec<RawFragment>,
+    pub(super) fragments: Vec<FragmentEntry>,
     root_inode_num: u32,
-    pub(super) decompress: DecompressContext,
+    decompress: DecompressContext,
     anon_device_id: AnonDeviceId,
-    self_ref: Weak<SquashFs>,
     root_inode: Once<Arc<dyn Inode>>,
     inode_cache: RwMutex<BTreeMap<u32, Weak<dyn Inode>>>,
+    block_cache: Mutex<LruCache<BlockCacheKey, Arc<Vec<u8>>>>,
     pub(super) fs_event_subscriber_stats: FsEventSubscriberStats,
+}
+
+/// Maximum number of decompressed blocks cached globally across all files.
+///
+/// Each entry holds up to one squashfs block (typically 128 KB).
+/// With 8 entries the worst-case memory bound is ~1 MB.
+const BLOCK_CACHE_CAPACITY: usize = 8;
+
+/// Key for the global decompressed-block LRU cache.
+///
+/// Data blocks are unique per (inode, block-index) pair because
+/// each file stores its data blocks at different on-disk locations.
+/// Fragment blocks are unique per `frag_index` — multiple files may
+/// share the same fragment block, so caching by `frag_index` avoids
+/// redundant decompression across files.
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+pub(super) enum BlockCacheKey {
+    /// A regular data block within a file.
+    DataBlock {
+        /// Inode number (identifies the file).
+        ino: u32,
+        /// Block index within that file (0-based).
+        block_idx: usize,
+    },
+    /// A fragment block, identified by its fragment-table index.
+    FragmentBlock {
+        /// Index into the fragment table.
+        frag_index: u32,
+    },
 }
 
 impl SquashFs {
@@ -125,12 +161,14 @@ impl SquashFs {
         )?;
 
         let fragments = if super_block.frag_count > 0 && super_block.frag_table != INVALID_BLK {
-            metadata::read_fragment_table(
+            let raw = metadata::read_lookup_table_raw(
                 &device,
                 super_block.frag_table,
-                super_block.frag_count,
+                size_of::<fragment::RawFragment>(),
+                super_block.frag_count as u64,
                 &decompress,
-            )?
+            )?;
+            fragment::parse_fragment_table(&raw)?
         } else {
             Vec::new()
         };
@@ -165,7 +203,7 @@ impl SquashFs {
             super_block.block_size,
         );
 
-        let fs = Arc::new_cyclic(|weak_self| SquashFs {
+        let fs = Arc::new(SquashFs {
             device,
             super_block,
             inodes,
@@ -174,9 +212,11 @@ impl SquashFs {
             root_inode_num,
             decompress,
             anon_device_id,
-            self_ref: weak_self.clone(),
             root_inode: Once::new(),
             inode_cache: RwMutex::new(BTreeMap::new()),
+            block_cache: Mutex::new(LruCache::new(
+                NonZeroUsize::new(BLOCK_CACHE_CAPACITY).unwrap(),
+            )),
             fs_event_subscriber_stats: FsEventSubscriberStats::new(),
         });
 
@@ -205,7 +245,7 @@ impl SquashFs {
     /// Returns a cached inode, creating one if it is not already in the cache
     /// or the previous instance has been dropped.
     pub(super) fn get_or_create_inode(
-        &self,
+        self: &Arc<SquashFs>,
         ino: u32,
     ) -> core::result::Result<Arc<dyn Inode>, Error> {
         if let Some(inode) = self.inode_cache.read().get(&ino).and_then(Weak::upgrade) {
@@ -225,11 +265,83 @@ impl SquashFs {
             parsed.meta.ino,
             parsed.body.clone(),
             parsed.meta.clone(),
-            self.self_ref.clone(),
+            Arc::downgrade(self),
             self.container_device_id(),
         );
         cache.insert(ino, Arc::downgrade(&inode));
         Ok(inode)
+    }
+
+    /// Returns a decompressed data block from the global cache,
+    /// decompressing it on demand if not already cached.
+    ///
+    /// The block is keyed by `(ino, block_idx)` so different files'
+    /// blocks are cached independently.
+    pub(super) fn get_or_decompress_data_block(
+        &self,
+        ino: u32,
+        block_idx: usize,
+        blocks_start: u64,
+        block_sizes: &[BlockSizeInfo],
+        file_size: usize,
+    ) -> Result<Arc<Vec<u8>>> {
+        let cache_key = BlockCacheKey::DataBlock { ino, block_idx };
+
+        {
+            let mut cache = self.block_cache.lock();
+            if let Some(data) = cache.get(&cache_key) {
+                return Ok(data.clone());
+            }
+        }
+
+        let disk_pos = blocks_start
+            + block_sizes[..block_idx]
+                .iter()
+                .map(|b| b.size as u64)
+                .sum::<u64>();
+
+        let data = Arc::new(decompress_raw_block_data(
+            &*self.device,
+            &self.decompress,
+            disk_pos,
+            block_sizes,
+            self.super_block.block_size,
+            file_size,
+            block_idx,
+        )?);
+
+        let mut cache = self.block_cache.lock();
+        cache.put(cache_key, data.clone());
+        Ok(data)
+    }
+
+    /// Returns a decompressed fragment block from the global cache,
+    /// decompressing it on demand if not already cached.
+    ///
+    /// Fragment blocks are keyed by `frag_index` only, because
+    /// multiple files may share the same fragment block. This avoids
+    /// redundant decompression when several small files reference
+    /// the same fragment.
+    pub(super) fn get_or_decompress_fragment_block(&self, frag_index: u32) -> Result<Arc<Vec<u8>>> {
+        let cache_key = BlockCacheKey::FragmentBlock { frag_index };
+
+        {
+            let mut cache = self.block_cache.lock();
+            if let Some(data) = cache.get(&cache_key) {
+                return Ok(data.clone());
+            }
+        }
+
+        let data = Arc::new(decompress_raw_fragment_data(
+            &*self.device,
+            &self.decompress,
+            &self.fragments,
+            frag_index,
+        )?);
+
+        let mut cache = self.block_cache.lock();
+        cache.put(cache_key, data.clone());
+        Ok(data)
     }
 }
 
