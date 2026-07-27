@@ -179,6 +179,7 @@ impl SquashFs {
                 block_index,
                 file_size,
                 block_offset,
+                ..
             } = &parsed.body
                 && let Some(dir) = dir::parse_dirs(
                     &dir_offset_map,

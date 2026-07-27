@@ -112,6 +112,8 @@ pub(super) enum InodeBody {
         file_size: u32,
         /// Byte offset within the metadata block.
         block_offset: u16,
+        /// Inode number of the parent directory (0 for root).
+        parent_inode: u32,
     },
     /// Symbolic link target.
     Symlink {
@@ -345,6 +347,7 @@ pub(super) fn parse_single_inode(
                     block_index: raw.block_index,
                     file_size: raw.file_size as u32,
                     block_offset: raw.block_offset,
+                    parent_inode: raw.parent_inode,
                 },
                 raw.nlink,
             )
@@ -364,6 +367,7 @@ pub(super) fn parse_single_inode(
                     block_index: raw.block_index,
                     file_size: raw.file_size,
                     block_offset: raw.block_offset,
+                    parent_inode: raw.parent_inode,
                 },
                 raw.nlink,
             )

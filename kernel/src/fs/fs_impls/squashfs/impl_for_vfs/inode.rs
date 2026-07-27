@@ -141,26 +141,43 @@ impl FileOps for SquashFsInode {
     }
 
     fn readdir_at(&self, offset: usize, visitor: &mut dyn DirentVisitor) -> Result<usize> {
-        if !self.body.is_dir() {
+        let InodeBody::Dir { parent_inode, .. } = &self.body else {
             return_errno_with_message!(Errno::ENOTDIR, "not a directory")
+        };
+        let parent_inode = if *parent_inode == 0 {
+            self.ino
+        } else {
+            *parent_inode
+        };
+
+        let mut count = 0;
+
+        if offset == 0 {
+            visitor.visit(".", self.ino as u64, InodeType::Dir, 1)?;
+            count += 1;
+        }
+
+        if offset <= 1 {
+            visitor.visit("..", parent_inode as u64, InodeType::Dir, 2)?;
+            count += 1;
         }
 
         let fs = self.fs()?;
         let entries = fs.dir_entries.get(&self.ino);
 
         let Some(entries) = entries else {
-            return Ok(0);
+            return Ok(count);
         };
 
-        if offset >= entries.len() {
-            return Ok(0);
+        let start_idx = offset.saturating_sub(2);
+        if start_idx >= entries.len() {
+            return Ok(count);
         }
 
-        let mut count = 0;
-        for (i, entry) in entries.iter().enumerate().skip(offset) {
+        for (i, entry) in entries.iter().enumerate().skip(start_idx) {
             let child_type = squash_inodeid_to_vfs_type(entry.inode_type);
             let name = core::str::from_utf8(&entry.name).unwrap_or("");
-            visitor.visit(name, entry.inode_num as u64, child_type, i + 1)?;
+            visitor.visit(name, entry.inode_num as u64, child_type, i + 3)?;
             count += 1;
         }
 
