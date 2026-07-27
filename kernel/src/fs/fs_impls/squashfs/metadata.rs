@@ -83,6 +83,10 @@ fn read_single_metadata_block(
     let compressed = header & METADATA_COMPRESSED_BIT == 0;
     let data_len = (header & !METADATA_COMPRESSED_BIT) as usize;
 
+    if data_len > METADATA_MAX_SIZE {
+        return Err(SquashfsError::CorruptedImage("metadata block too large"));
+    }
+
     if data_len == 0 {
         return Ok((Vec::new(), 2));
     }

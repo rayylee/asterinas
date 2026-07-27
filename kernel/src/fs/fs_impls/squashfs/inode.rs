@@ -343,8 +343,14 @@ pub(super) fn parse_single_inode(
 
     let id = InodeId::try_from(base.inode_type)?;
 
-    let uid = id_table.get(base.uid_idx as usize).copied().unwrap_or(0);
-    let gid = id_table.get(base.gid_idx as usize).copied().unwrap_or(0);
+    let uid = id_table
+        .get(base.uid_idx as usize)
+        .copied()
+        .ok_or(SquashfsError::CorruptedImage("uid index out of bounds"))?;
+    let gid = id_table
+        .get(base.gid_idx as usize)
+        .copied()
+        .ok_or(SquashfsError::CorruptedImage("gid index out of bounds"))?;
 
     let (body, nlink) = match id {
         InodeId::BasicDirectory => {
