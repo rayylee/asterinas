@@ -202,10 +202,7 @@ impl Inode for SquashFsInode {
             last_meta_change_at: Duration::from_secs(self.meta.mtime as u64),
             type_: self.inode_type(),
             mode: InodeMode::from_bits_truncate(self.meta.permissions),
-            nr_hard_links: match self.inode_type() {
-                InodeType::Dir => 2,
-                _ => 1,
-            },
+            nr_hard_links: self.meta.nlink as usize,
             uid: Uid::new(self.meta.uid),
             gid: Gid::new(self.meta.gid),
             container_dev_id: self.container_dev_id,

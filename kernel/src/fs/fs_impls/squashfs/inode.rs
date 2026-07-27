@@ -73,7 +73,7 @@ pub(super) struct ParsedInode {
 /// Common metadata shared by all inode types.
 ///
 /// Every Squashfs inode begins with a `RawBaseInode` header
-/// containing: inode_type, mode, uid, gid, mtime, and inode_number.
+/// containing: inode_type, mode, uid, gid, mtime, ino, and nlink.
 #[derive(Clone)]
 pub(super) struct InodeMeta {
     pub(super) permissions: u16,
@@ -81,6 +81,7 @@ pub(super) struct InodeMeta {
     pub(super) gid: u32,
     pub(super) mtime: u32,
     pub(super) ino: u32,
+    pub(super) nlink: u32,
 }
 
 /// Type-specific inode data.
@@ -334,24 +335,19 @@ pub(super) fn parse_single_inode(
     let uid = id_table.get(base.uid_idx as usize).copied().unwrap_or(0);
     let gid = id_table.get(base.gid_idx as usize).copied().unwrap_or(0);
 
-    let meta = InodeMeta {
-        permissions: base.permissions,
-        uid,
-        gid,
-        mtime: base.mtime,
-        ino: base.inode_number,
-    };
-
-    let body = match id {
+    let (body, nlink) = match id {
         InodeId::BasicDirectory => {
             let (raw, _) = RawBasicDir::read_from_prefix(&data[offset..])
                 .map_err(|_| SquashfsError::CorruptedImage("truncated dir inode"))?;
             offset += size_of::<RawBasicDir>();
-            InodeBody::Dir {
-                block_index: raw.block_index,
-                file_size: raw.file_size as u32,
-                block_offset: raw.block_offset,
-            }
+            (
+                InodeBody::Dir {
+                    block_index: raw.block_index,
+                    file_size: raw.file_size as u32,
+                    block_offset: raw.block_offset,
+                },
+                raw.nlink,
+            )
         }
         InodeId::ExtendedDirectory => {
             let (raw, _) = RawExtendedDir::read_from_prefix(&data[offset..])
@@ -363,11 +359,14 @@ pub(super) fn parse_single_inode(
                 let name_size = types::read_u32(data, &mut offset)?;
                 offset += (name_size + 1) as usize;
             }
-            InodeBody::Dir {
-                block_index: raw.block_index,
-                file_size: raw.file_size,
-                block_offset: raw.block_offset,
-            }
+            (
+                InodeBody::Dir {
+                    block_index: raw.block_index,
+                    file_size: raw.file_size,
+                    block_offset: raw.block_offset,
+                },
+                raw.nlink,
+            )
         }
         InodeId::BasicFile => {
             let (raw, _) = RawBasicFile::read_from_prefix(&data[offset..])
@@ -380,13 +379,17 @@ pub(super) fn parse_single_inode(
                 let raw_size = types::read_u32(data, &mut offset)?;
                 block_sizes.push(BlockSizeInfo::from_raw(raw_size));
             }
-            InodeBody::File {
-                blocks_start: raw.blocks_start as u64,
-                frag_index: raw.frag_index,
-                block_offset: raw.block_offset,
-                file_size: raw.file_size as u64,
-                block_sizes,
-            }
+            (
+                InodeBody::File {
+                    blocks_start: raw.blocks_start as u64,
+                    frag_index: raw.frag_index,
+                    block_offset: raw.block_offset,
+                    file_size: raw.file_size as u64,
+                    block_sizes,
+                },
+                // Basic files don't support hard-link accounting.
+                1,
+            )
         }
         InodeId::ExtendedFile => {
             let (raw, _) = RawExtendedFile::read_from_prefix(&data[offset..])
@@ -398,13 +401,16 @@ pub(super) fn parse_single_inode(
                 let raw_size = types::read_u32(data, &mut offset)?;
                 block_sizes.push(BlockSizeInfo::from_raw(raw_size));
             }
-            InodeBody::File {
-                blocks_start: raw.blocks_start,
-                frag_index: raw.frag_index,
-                block_offset: raw.block_offset,
-                file_size: raw.file_size,
-                block_sizes,
-            }
+            (
+                InodeBody::File {
+                    blocks_start: raw.blocks_start,
+                    frag_index: raw.frag_index,
+                    block_offset: raw.block_offset,
+                    file_size: raw.file_size,
+                    block_sizes,
+                },
+                raw.nlink,
+            )
         }
         InodeId::BasicSymlink => {
             let (raw, _) = RawSymlink::read_from_prefix(&data[offset..])
@@ -416,36 +422,51 @@ pub(super) fn parse_single_inode(
             }
             let target = data[offset..offset + target_size].to_vec();
             offset += target_size;
-            InodeBody::Symlink { target }
+            (InodeBody::Symlink { target }, raw.nlink)
         }
         InodeId::BasicBlockDevice => {
             let (raw, _) = RawDevice::read_from_prefix(&data[offset..])
                 .map_err(|_| SquashfsError::CorruptedImage("truncated device inode"))?;
             offset += size_of::<RawDevice>();
-            InodeBody::BlockDevice {
-                device_number: raw.device_number,
-            }
+            (
+                InodeBody::BlockDevice {
+                    device_number: raw.device_number,
+                },
+                raw.nlink,
+            )
         }
         InodeId::BasicCharacterDevice => {
             let (raw, _) = RawDevice::read_from_prefix(&data[offset..])
                 .map_err(|_| SquashfsError::CorruptedImage("truncated device inode"))?;
             offset += size_of::<RawDevice>();
-            InodeBody::CharDevice {
-                device_number: raw.device_number,
-            }
+            (
+                InodeBody::CharDevice {
+                    device_number: raw.device_number,
+                },
+                raw.nlink,
+            )
         }
         InodeId::BasicNamedPipe => {
-            let (_raw, _) = RawIpc::read_from_prefix(&data[offset..])
+            let (raw, _) = RawIpc::read_from_prefix(&data[offset..])
                 .map_err(|_| SquashfsError::CorruptedImage("truncated ipc inode"))?;
             offset += size_of::<RawIpc>();
-            InodeBody::NamedPipe
+            (InodeBody::NamedPipe, raw.nlink)
         }
         InodeId::BasicSocket => {
-            let (_raw, _) = RawIpc::read_from_prefix(&data[offset..])
+            let (raw, _) = RawIpc::read_from_prefix(&data[offset..])
                 .map_err(|_| SquashfsError::CorruptedImage("truncated ipc inode"))?;
             offset += size_of::<RawIpc>();
-            InodeBody::Socket
+            (InodeBody::Socket, raw.nlink)
         }
+    };
+
+    let meta = InodeMeta {
+        permissions: base.permissions,
+        uid,
+        gid,
+        mtime: base.mtime,
+        ino: base.inode_number,
+        nlink,
     };
 
     Ok((ParsedInode { meta, body }, offset - start))
