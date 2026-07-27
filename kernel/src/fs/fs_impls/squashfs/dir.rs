@@ -128,7 +128,9 @@ pub(super) fn parse_dirs(
                 .map_err(|_| SquashfsError::CorruptedImage("truncated dir entry"))?;
             pos += size_of::<RawDirEntry>();
 
-            let entry_inode = (header.inode_number as i32 + entry.inode_offset as i32) as u32;
+            // The spec defines inode_offset as s16 (signed), but Pod requires u16 on disk.
+            // Cast to i16 first to preserve the sign before widening to i32.
+            let entry_inode = (header.inode_number as i32 + (entry.inode_offset as i16) as i32) as u32;
             let inode_type = InodeId::try_from(entry.type_)?;
 
             let name_len = (entry.size + 1) as usize;
