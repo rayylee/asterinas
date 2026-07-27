@@ -79,7 +79,7 @@ impl DecompressContext {
                 let decompressed = decoder
                     .decode_zlib()
                     .map_err(|_| SquashfsError::DecompressError)?;
-                *output = decompressed;
+                output.extend_from_slice(&decompressed);
                 Ok(())
             }
             Compressor::Zstd => {

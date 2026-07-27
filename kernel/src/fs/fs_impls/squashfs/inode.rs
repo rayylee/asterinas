@@ -122,12 +122,14 @@ pub(super) enum InodeBody {
     },
     /// Block device node.
     BlockDevice {
-        /// Encoded device number (major << 20 | minor).
+        /// Device number in Linux `new_encode_dev` format:
+        /// `(minor & 0xff) | (major << 8) | ((minor & ~0xff) << 12)`
         device_number: u32,
     },
     /// Character device node.
     CharDevice {
-        /// Encoded device number (major << 20 | minor).
+        /// Device number in Linux `new_encode_dev` format:
+        /// `(minor & 0xff) | (major << 8) | ((minor & ~0xff) << 12)`
         device_number: u32,
     },
     /// Named pipe (FIFO).
@@ -298,13 +300,15 @@ pub(super) fn parse_all_inodes(
     data: &[u8],
     block_size: u32,
     id_table: &[u32],
+    inode_count: u32,
 ) -> Result<BTreeMap<u32, ParsedInode>, SquashfsError> {
     let mut inodes = BTreeMap::new();
     let len = data.len();
     let mut offset = 0;
 
     while offset < len {
-        let (parsed, consumed) = parse_single_inode(data, offset, block_size, id_table)?;
+        let (parsed, consumed) =
+            parse_single_inode(data, offset, block_size, id_table, inode_count)?;
         if consumed == 0 {
             break;
         }
@@ -325,12 +329,17 @@ pub(super) fn parse_single_inode(
     start: usize,
     block_size: u32,
     id_table: &[u32],
+    inode_count: u32,
 ) -> Result<(ParsedInode, usize), SquashfsError> {
     let mut offset = start;
 
     let (base, _) = RawBaseInode::read_from_prefix(&data[offset..])
         .map_err(|_| SquashfsError::CorruptedImage("truncated inode header"))?;
     offset += size_of::<RawBaseInode>();
+
+    if base.inode_number == 0 || base.inode_number > inode_count {
+        return Err(SquashfsError::CorruptedImage("inode number out of range"));
+    }
 
     let id = InodeId::try_from(base.inode_type)?;
 

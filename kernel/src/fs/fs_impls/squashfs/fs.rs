@@ -126,7 +126,12 @@ impl SquashFs {
             &decompress,
         )?;
 
-        let inodes = inode::parse_all_inodes(&inode_data, super_block.block_size, &ids)?;
+        let inodes = inode::parse_all_inodes(
+            &inode_data,
+            super_block.block_size,
+            &ids,
+            super_block.inode_count,
+        )?;
 
         let root_inode_num = {
             let root_block = super_block.root_inode >> 16;
@@ -141,6 +146,7 @@ impl SquashFs {
                 data_off + root_offset,
                 super_block.block_size,
                 &ids,
+                super_block.inode_count,
             )?;
             root_parsed.meta.ino
         };

@@ -135,7 +135,10 @@ pub(super) fn parse_dirs(
             if pos + name_len > end {
                 return Err(SquashfsError::CorruptedImage("directory name truncated"));
             }
-            let name = data[pos..pos + name_len].to_vec();
+            let mut name = data[pos..pos + name_len].to_vec();
+            if name.last() == Some(&0) {
+                name.pop();
+            }
             pos += name_len;
 
             entries.push(SquashDirEntry {
