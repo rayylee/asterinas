@@ -42,6 +42,16 @@ pub(super) enum InodeId {
     ExtendedDirectory = 8,
     /// Regular file inode with extended attributes and 64-bit fields.
     ExtendedFile = 9,
+    /// Symbolic link inode with extended attributes.
+    ExtendedSymlink = 10,
+    /// Block device inode with extended attributes.
+    ExtendedBlockDevice = 11,
+    /// Character device inode with extended attributes.
+    ExtendedCharDevice = 12,
+    /// Named pipe (FIFO) inode with extended attributes.
+    ExtendedNamedPipe = 13,
+    /// Unix domain socket inode with extended attributes.
+    ExtendedSocket = 14,
 }
 
 impl TryFrom<u16> for InodeId {
@@ -58,6 +68,11 @@ impl TryFrom<u16> for InodeId {
             7 => Ok(Self::BasicSocket),
             8 => Ok(Self::ExtendedDirectory),
             9 => Ok(Self::ExtendedFile),
+            10 => Ok(Self::ExtendedSymlink),
+            11 => Ok(Self::ExtendedBlockDevice),
+            12 => Ok(Self::ExtendedCharDevice),
+            13 => Ok(Self::ExtendedNamedPipe),
+            14 => Ok(Self::ExtendedSocket),
             _ => Err(SquashfsError::CorruptedImage("unknown inode id")),
         }
     }
@@ -475,6 +490,62 @@ pub(super) fn parse_single_inode(
             let (raw, _) = RawIpc::read_from_prefix(&data[offset..])
                 .map_err(|_| SquashfsError::CorruptedImage("truncated ipc inode"))?;
             offset += size_of::<RawIpc>();
+            (InodeBody::Socket, raw.nlink)
+        }
+        InodeId::ExtendedSymlink => {
+            let (raw, _) = RawSymlink::read_from_prefix(&data[offset..])
+                .map_err(|_| SquashfsError::CorruptedImage("truncated symlink inode"))?;
+            offset += size_of::<RawSymlink>();
+            let target_size = raw.target_size as usize;
+            if offset + target_size > data.len() {
+                return Err(SquashfsError::CorruptedImage("symlink target truncated"));
+            }
+            let target = data[offset..offset + target_size].to_vec();
+            offset += target_size;
+            // Skip xattr_index field — xattrs are not supported now.
+            offset += size_of::<u32>();
+            (InodeBody::Symlink { target }, raw.nlink)
+        }
+        InodeId::ExtendedBlockDevice => {
+            let (raw, _) = RawDevice::read_from_prefix(&data[offset..])
+                .map_err(|_| SquashfsError::CorruptedImage("truncated device inode"))?;
+            offset += size_of::<RawDevice>();
+            // Skip xattr_index field — xattrs are not supported now.
+            offset += size_of::<u32>();
+            (
+                InodeBody::BlockDevice {
+                    device_number: raw.device_number,
+                },
+                raw.nlink,
+            )
+        }
+        InodeId::ExtendedCharDevice => {
+            let (raw, _) = RawDevice::read_from_prefix(&data[offset..])
+                .map_err(|_| SquashfsError::CorruptedImage("truncated device inode"))?;
+            offset += size_of::<RawDevice>();
+            // Skip xattr_index field — xattrs are not supported now.
+            offset += size_of::<u32>();
+            (
+                InodeBody::CharDevice {
+                    device_number: raw.device_number,
+                },
+                raw.nlink,
+            )
+        }
+        InodeId::ExtendedNamedPipe => {
+            let (raw, _) = RawIpc::read_from_prefix(&data[offset..])
+                .map_err(|_| SquashfsError::CorruptedImage("truncated ipc inode"))?;
+            offset += size_of::<RawIpc>();
+            // Skip xattr_index field — xattrs are not supported now.
+            offset += size_of::<u32>();
+            (InodeBody::NamedPipe, raw.nlink)
+        }
+        InodeId::ExtendedSocket => {
+            let (raw, _) = RawIpc::read_from_prefix(&data[offset..])
+                .map_err(|_| SquashfsError::CorruptedImage("truncated ipc inode"))?;
+            offset += size_of::<RawIpc>();
+            // Skip xattr_index field — xattrs are not supported now.
+            offset += size_of::<u32>();
             (InodeBody::Socket, raw.nlink)
         }
     };

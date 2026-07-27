@@ -436,11 +436,11 @@ fn squash_inodeid_to_vfs_type(id: InodeId) -> InodeType {
     match id {
         InodeId::BasicDirectory | InodeId::ExtendedDirectory => InodeType::Dir,
         InodeId::BasicFile | InodeId::ExtendedFile => InodeType::File,
-        InodeId::BasicSymlink => InodeType::SymLink,
-        InodeId::BasicBlockDevice => InodeType::BlockDevice,
-        InodeId::BasicCharacterDevice => InodeType::CharDevice,
-        InodeId::BasicNamedPipe => InodeType::NamedPipe,
-        InodeId::BasicSocket => InodeType::Socket,
+        InodeId::BasicSymlink | InodeId::ExtendedSymlink => InodeType::SymLink,
+        InodeId::BasicBlockDevice | InodeId::ExtendedBlockDevice => InodeType::BlockDevice,
+        InodeId::BasicCharacterDevice | InodeId::ExtendedCharDevice => InodeType::CharDevice,
+        InodeId::BasicNamedPipe | InodeId::ExtendedNamedPipe => InodeType::NamedPipe,
+        InodeId::BasicSocket | InodeId::ExtendedSocket => InodeType::Socket,
     }
 }
 
