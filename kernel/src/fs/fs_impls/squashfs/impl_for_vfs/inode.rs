@@ -194,7 +194,7 @@ impl Inode for SquashFsInode {
         return_errno_with_message!(Errno::EROFS, "SquashFS is read-only")
     }
 
-    fn metadata(&self) -> Metadata {
+    fn metadata(&self) -> Result<Metadata> {
         let self_dev_id = match self.inode_type() {
             InodeType::BlockDevice | InodeType::CharDevice => {
                 let device_number = match &self.body {
@@ -206,7 +206,7 @@ impl Inode for SquashFsInode {
             }
             _ => None,
         };
-        Metadata {
+        Ok(Metadata {
             ino: self.ino as u64,
             size: self.size(),
             optimal_block_size: self
@@ -225,7 +225,7 @@ impl Inode for SquashFsInode {
             container_dev_id: self.container_dev_id,
             self_dev_id,
             birth_at: None,
-        }
+        })
     }
 
     fn ino(&self) -> u64 {
