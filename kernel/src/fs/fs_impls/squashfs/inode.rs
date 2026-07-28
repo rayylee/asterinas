@@ -390,7 +390,15 @@ pub(super) fn parse_single_inode(
                 let _index = types::read_u32(data, &mut offset)?;
                 let _start = types::read_u32(data, &mut offset)?;
                 let name_size = types::read_u32(data, &mut offset)?;
-                offset += (name_size + 1) as usize;
+                let name_len = name_size
+                    .checked_add(1)
+                    .ok_or(SquashfsError::CorruptedImage(
+                        "dir index name_size overflow",
+                    ))? as usize;
+                if offset + name_len > data.len() {
+                    return Err(SquashfsError::CorruptedImage("dir index name truncated"));
+                }
+                offset += name_len;
             }
             (
                 InodeBody::Dir {

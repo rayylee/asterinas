@@ -80,7 +80,7 @@ pub(super) struct SquashDirEntry {
     pub(super) inode_num: u32,
     /// Type of the referenced inode.
     pub(super) inode_type: InodeId,
-    /// Filename including null terminator byte.
+    /// Filename (not null-terminated, per the spec).
     pub(super) name: Vec<u8>,
 }
 
@@ -116,7 +116,7 @@ pub(super) fn parse_dirs(
             .map_err(|_| SquashfsError::CorruptedImage("truncated dir header"))?;
         pos += size_of::<RawDirHeader>();
 
-        if header.count > DIR_HEADER_MAX_COUNT {
+        if header.count > DIR_HEADER_MAX_COUNT - 1 {
             return Err(SquashfsError::CorruptedImage("directory entry count > 256"));
         }
 
@@ -134,14 +134,13 @@ pub(super) fn parse_dirs(
                 (header.inode_number as i32 + (entry.inode_offset as i16) as i32) as u32;
             let inode_type = InodeId::try_from(entry.type_)?;
 
+            // name_size is stored off-by-one; the actual name is name_size+1
+            // bytes long and is NOT null-terminated per the spec.
             let name_len = (entry.size + 1) as usize;
             if pos + name_len > end {
                 return Err(SquashfsError::CorruptedImage("directory name truncated"));
             }
-            let mut name = data[pos..pos + name_len].to_vec();
-            if name.last() == Some(&0) {
-                name.pop();
-            }
+            let name = data[pos..pos + name_len].to_vec();
             pos += name_len;
 
             entries.push(SquashDirEntry {

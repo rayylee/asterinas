@@ -4,7 +4,7 @@
 //!
 //! Squashfs supports multiple compression algorithms. Each data block
 //! and metadata block can be individually compressed or stored uncompressed.
-//! Currently supported: uncompressed, gzip (zlib), and zstd.
+//! Currently supported: gzip (zlib) and zstd.
 
 use ruzstd::{decoding::StreamingDecoder, io::Read as _};
 use zune_inflate::DeflateDecoder;
@@ -20,7 +20,6 @@ use crate::prelude::*;
 #[repr(u16)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Compressor {
-    Uncompressed = 0,
     Gzip = 1,
     Lzma = 2,
     Lzo = 3,
@@ -34,7 +33,6 @@ impl TryFrom<u16> for Compressor {
 
     fn try_from(v: u16) -> Result<Self, SquashfsError> {
         match v {
-            0 => Ok(Self::Uncompressed),
             1 => Ok(Self::Gzip),
             2 => Ok(Self::Lzma),
             3 => Ok(Self::Lzo),
@@ -61,7 +59,6 @@ impl DecompressContext {
 
     /// Decompresses `input` into `output` using the configured algorithm.
     ///
-    /// If the compressor is `Uncompressed`, the input is copied directly.
     /// Only gzip (zlib format) and zstd are currently implemented;
     /// other algorithms return an error.
     pub(super) fn decompress(
@@ -70,10 +67,6 @@ impl DecompressContext {
         output: &mut Vec<u8>,
     ) -> Result<(), SquashfsError> {
         match self.compressor {
-            Compressor::Uncompressed => {
-                output.extend_from_slice(input);
-                Ok(())
-            }
             Compressor::Gzip => {
                 let mut decoder = DeflateDecoder::new(input);
                 let decompressed = decoder
