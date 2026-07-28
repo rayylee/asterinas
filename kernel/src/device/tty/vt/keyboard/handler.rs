@@ -397,12 +397,14 @@ impl VtKeyboardHandler {
                 };
             }
             SpecialHandler::DecreaseConsole | SpecialHandler::IncreaseConsole => unreachable!(),
+            SpecialHandler::Reboot => {
+                ostd::power::restart(ostd::power::ExitCode::Success);
+            }
             SpecialHandler::ScrollBackward
             | SpecialHandler::ScrollForward
             | SpecialHandler::ShowMem
             | SpecialHandler::ShowState
-            | SpecialHandler::Compose
-            | SpecialHandler::Reboot => {
+            | SpecialHandler::Compose => {
                 ostd::warn!("VT keyboard action {:?} is not implemented yet", handler);
             }
         }
