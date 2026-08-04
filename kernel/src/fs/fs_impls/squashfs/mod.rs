@@ -22,11 +22,12 @@
 use core::fmt;
 
 use aster_systree::SysNode;
+use device_id::DeviceId;
 
 use crate::{
     fs::vfs::{
         file_system::FileSystem,
-        registry::{FsCreationCtx, FsProperties, FsType},
+        registry::{FsCache, FsCreationCtx, FsProperties, FsType},
     },
     prelude::*,
 };
@@ -88,9 +89,17 @@ impl From<SquashfsError> for Error {
     }
 }
 
-struct SquashFsType;
+struct SquashFsType {
+    cache: FsCache<DeviceId>,
+}
+
+static SQUASHFS_TYPE: SquashFsType = SquashFsType {
+    cache: FsCache::new(),
+};
 
 impl FsType for SquashFsType {
+    type Key = DeviceId;
+
     fn name(&self) -> &'static str {
         "squashfs"
     }
@@ -99,9 +108,21 @@ impl FsType for SquashFsType {
         FsProperties::NEED_DISK
     }
 
-    fn create(&self, fs_creation_ctx: &FsCreationCtx) -> Result<Arc<dyn FileSystem>> {
-        let disk = fs_creation_ctx.resolve_block_device()?;
+    fn create(&self, fs_creation_ctx: &mut FsCreationCtx) -> Result<Arc<dyn FileSystem>> {
+        let disk = fs_creation_ctx.resolve_block_device()?.clone();
         SquashFs::open(disk).map(|fs| fs as Arc<dyn FileSystem>)
+    }
+
+    fn obtain_key_and_cache(
+        &self,
+        fs_creation_ctx: &mut FsCreationCtx,
+    ) -> Option<(DeviceId, &FsCache<DeviceId>)> {
+        let key = fs_creation_ctx
+            .resolve_block_device()
+            .ok()
+            .map(|disk| disk.id())?;
+
+        Some((key, &self.cache))
     }
 
     fn sysnode(&self) -> Option<Arc<dyn SysNode>> {
@@ -110,5 +131,5 @@ impl FsType for SquashFsType {
 }
 
 pub(super) fn init() {
-    crate::fs::vfs::registry::register(&SquashFsType).unwrap();
+    crate::fs::vfs::registry::register(&SQUASHFS_TYPE).unwrap();
 }
