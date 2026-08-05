@@ -7,7 +7,7 @@ use crate::{
     fs::{
         utils::NAME_MAX,
         vfs::{
-            file_system::{FileSystem, FsEventSubscriberStats, SuperBlock},
+            file_system::{FileSystem, FsEventSubscriberStats, FsFlags, SuperBlock},
             inode::Inode,
         },
     },
@@ -26,6 +26,10 @@ impl FileSystem for SquashFs {
 
     fn sync(&self) -> Result<()> {
         Ok(())
+    }
+
+    fn flags(&self) -> FsFlags {
+        FsFlags::RDONLY
     }
 
     fn root_inode(&self) -> Arc<dyn Inode> {
