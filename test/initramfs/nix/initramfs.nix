@@ -27,7 +27,7 @@ in stdenvNoCC.mkDerivation {
   name = "initramfs";
   buildCommand = ''
     mkdir -p $out/{dev,etc,root,usr,opt,tmp,var,proc,sys}
-    mkdir -p $out/{benchmark,test,ext2,exfat}
+    mkdir -p $out/{benchmark,test,ext2,exfat,squashfs}
     mkdir -p $out/usr/{bin,sbin,lib,lib64,local}
     ln -sfn usr/bin $out/bin
     ln -sfn usr/sbin $out/sbin

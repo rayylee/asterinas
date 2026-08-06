@@ -29,6 +29,7 @@ INITRAMFS_COMPRESSED := true
 endif
 EXT2_IMAGE := $(BUILD_DIR)/ext2.img
 EXFAT_IMAGE := $(BUILD_DIR)/exfat.img
+SQUASHFS_IMAGE := $(BUILD_DIR)/squashfs.img
 LTP_DEV_IMAGE := $(BUILD_DIR)/ltp_dev.img
 SSD_IMAGE := $(BUILD_DIR)/nvme0n1.img
 XFSTESTS_TEST_IMAGE := $(BUILD_DIR)/xfstests_test.img
@@ -65,7 +66,7 @@ build: $(EXT2_IMAGE) $(EXFAT_IMAGE)
 else ifeq ($(BUILD_XFSTESTS_IMAGES), true)
 build: $(INITRAMFS_IMAGE) $(EXT2_IMAGE) $(EXFAT_IMAGE) $(LTP_DEV_IMAGE) $(SSD_IMAGE) $(XFSTESTS_TEST_IMAGE) $(XFSTESTS_SCRATCH_IMAGE)
 else
-build: $(INITRAMFS_IMAGE) $(EXT2_IMAGE) $(EXFAT_IMAGE) $(LTP_DEV_IMAGE) $(SSD_IMAGE)
+build: $(INITRAMFS_IMAGE) $(EXT2_IMAGE) $(EXFAT_IMAGE) $(SQUASHFS_IMAGE) $(LTP_DEV_IMAGE) $(SSD_IMAGE)
 endif
 
 .PHONY: $(INITRAMFS_IMAGE)
@@ -176,6 +177,50 @@ $(EXFAT_IMAGE):
 	@mkdir -p $(BUILD_DIR)
 	@fallocate -l 512M $(EXFAT_IMAGE)
 	@mkfs.exfat $(EXFAT_IMAGE)
+
+SQUASHFS_ROOT := $(BUILD_DIR)/squashfs_root
+SQUASHFS_LONG_NAME := $(shell printf 'long_filename_%0200d.txt' 0)
+
+$(SQUASHFS_IMAGE):
+	@mkdir -p $(BUILD_DIR)
+	@rm -rf $(SQUASHFS_ROOT)
+	@mkdir -p $(SQUASHFS_ROOT)
+	@# Small file
+	@printf 'hello squashfs\n' > $(SQUASHFS_ROOT)/small.txt
+	@# Empty file
+	@touch $(SQUASHFS_ROOT)/empty.txt
+	@# Exact block-size file (4096 bytes of 'A')
+	@dd if=/dev/zero bs=4096 count=1 2>/dev/null | tr '\0' 'A' > $(SQUASHFS_ROOT)/exact_block.bin
+	@# Large file (128KB, each byte = offset % 256)
+	@python3 -c "import sys; sys.stdout.buffer.write(bytes([i%256 for i in range(131072)]))" > $(SQUASHFS_ROOT)/large.bin
+	@# Fragment file (100 bytes, content "fragment_test" repeated)
+	@printf 'fragment_test\n' > $(SQUASHFS_ROOT)/fragment.txt
+	@# Symlink
+	@ln -s small.txt $(SQUASHFS_ROOT)/link.txt
+	@# Deep directory (8 levels)
+	@mkdir -p $(SQUASHFS_ROOT)/a/b/c/d/e/f/g/h
+	@printf 'deep file\n' > $(SQUASHFS_ROOT)/a/b/c/d/e/f/g/h/deep.txt
+	@# Long target symlink (> 60 chars to trigger extended symlink)
+	@ln -s a/b/c/d/e/f/g/h/deep.txt $(SQUASHFS_ROOT)/long_target_link
+	@# Many entries directory (200 files)
+	@mkdir -p $(SQUASHFS_ROOT)/many_entries
+	@for i in $$(seq -w 0 199); do touch $(SQUASHFS_ROOT)/many_entries/file_$$i; done
+	@# Long filename (255 bytes)
+	@touch "$(SQUASHFS_ROOT)/$(SQUASHFS_LONG_NAME)"
+	@# Permission variants
+	@mkdir -p $(SQUASHFS_ROOT)/permissions
+	@touch $(SQUASHFS_ROOT)/permissions/readonly.txt
+	@chmod 0444 $(SQUASHFS_ROOT)/permissions/readonly.txt
+	@touch $(SQUASHFS_ROOT)/permissions/executable.sh
+	@chmod 0755 $(SQUASHFS_ROOT)/permissions/executable.sh
+	@touch $(SQUASHFS_ROOT)/permissions/noperm.txt
+	@chmod 0000 $(SQUASHFS_ROOT)/permissions/noperm.txt
+	@# Mixed types directory
+	@mkdir -p $(SQUASHFS_ROOT)/mixed_types/subdir
+	@printf 'regular\n' > $(SQUASHFS_ROOT)/mixed_types/regular.txt
+	@ln -s regular.txt $(SQUASHFS_ROOT)/mixed_types/symlink
+	@mksquashfs $(SQUASHFS_ROOT) $(SQUASHFS_IMAGE) -noappend -comp zstd
+	@rm -rf $(SQUASHFS_ROOT)
 
 $(LTP_DEV_IMAGE):
 	@mkdir -p $(BUILD_DIR)

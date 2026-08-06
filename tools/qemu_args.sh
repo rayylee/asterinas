@@ -88,6 +88,8 @@ if [ "$1" = "riscv" ]; then
         -drive if=none,format=raw,id=x0,file=./test/initramfs/build/ext2.img \
         -drive if=none,format=raw,id=x1,file=./test/initramfs/build/exfat.img \
         -drive if=none,format=raw,id=x2,file=./test/initramfs/build/ltp_dev.img \
+        -drive if=none,format=raw,id=x3,file=./test/initramfs/build/squashfs.img \
+        -device virtio-blk-device,drive=x3 \
         -device virtio-blk-device,drive=x2 \
         -device virtio-blk-device,drive=x1 \
         -device virtio-blk-device,drive=x0 \
@@ -116,9 +118,11 @@ if [ "$1" = "tdx" ]; then
         -drive if=none,format=raw,id=x0,file=./test/initramfs/build/ext2.img \
         -drive if=none,format=raw,id=x1,file=./test/initramfs/build/exfat.img \
         -drive if=none,format=raw,id=x2,file=./test/initramfs/build/ltp_dev.img \
+        -drive if=none,format=raw,id=x3,file=./test/initramfs/build/squashfs.img \
         -device virtio-blk-pci,bus=pcie.0,addr=0x6,drive=x0,serial=vext2,disable-legacy=on,disable-modern=off,queue-size=64,num-queues=1,request-merging=off,backend_defaults=off,discard=off,write-zeroes=off,event_idx=off,indirect_desc=off,queue_reset=off \
         -device virtio-blk-pci,bus=pcie.0,addr=0x7,drive=x1,serial=vexfat,disable-legacy=on,disable-modern=off,queue-size=64,num-queues=1,request-merging=off,backend_defaults=off,discard=off,write-zeroes=off,event_idx=off,indirect_desc=off,queue_reset=off \
         -device virtio-blk-pci,bus=pcie.0,addr=0x8,drive=x2,serial=vltpdev,disable-legacy=on,disable-modern=off,queue-size=64,num-queues=1,request-merging=off,backend_defaults=off,discard=off,write-zeroes=off,event_idx=off,indirect_desc=off,queue_reset=off \
+        -device virtio-blk-pci,bus=pcie.0,addr=0x9,drive=x3,serial=vsquashfs,disable-legacy=on,disable-modern=off,queue-size=64,num-queues=1,request-merging=off,backend_defaults=off,discard=off,write-zeroes=off,event_idx=off,indirect_desc=off,queue_reset=off \
         -device virtio-net-pci,netdev=net01,disable-legacy=on,disable-modern=off$VIRTIO_NET_FEATURES \
         -device virtio-keyboard-pci,disable-legacy=on,disable-modern=off \
         $NETDEV_ARGS \
@@ -149,13 +153,14 @@ COMMON_QEMU_ARGS="\
     -drive if=none,format=raw,id=x0,file=./test/initramfs/build/ext2.img \
     -drive if=none,format=raw,id=x1,file=./test/initramfs/build/exfat.img \
     -drive if=none,format=raw,id=x2,file=./test/initramfs/build/ltp_dev.img \
+    -drive if=none,format=raw,id=x3,file=./test/initramfs/build/squashfs.img \
 "
 
 # Add xfstests drives when the selected conformance suite is `xfstests`.
 if [ "$ATTACH_XFSTESTS_IMAGES" = "true" ]; then
     COMMON_QEMU_ARGS="$COMMON_QEMU_ARGS \
-    -drive if=none,format=raw,id=x3,file=./test/initramfs/build/xfstests_test.img \
-    -drive if=none,format=raw,id=x4,file=./test/initramfs/build/xfstests_scratch.img \
+    -drive if=none,format=raw,id=x4,file=./test/initramfs/build/xfstests_test.img \
+    -drive if=none,format=raw,id=x5,file=./test/initramfs/build/xfstests_scratch.img \
 "
 fi
 
@@ -181,6 +186,7 @@ if [ "$1" = "microvm" ]; then
         -device virtio-blk-device,drive=x0,serial=vext2 \
         -device virtio-blk-device,drive=x1,serial=vexfat \
         -device virtio-blk-device,drive=x2,serial=vltpdev \
+        -device virtio-blk-device,drive=x3,serial=vsquashfs \
         -device virtio-keyboard-device \
         -device virtio-net-device,netdev=net01 \
         -device virtio-serial-device \
@@ -193,8 +199,9 @@ else
         -device virtio-blk-pci,bus=pcie.0,addr=0x6,drive=x0,serial=vext2,disable-legacy=on,disable-modern=off,queue-size=64,num-queues=1,request-merging=off,backend_defaults=off,discard=off,write-zeroes=off,event_idx=off,indirect_desc=off,queue_reset=off$IOMMU_DEV_EXTRA \
         -device virtio-blk-pci,bus=pcie.0,addr=0x7,drive=x1,serial=vexfat,disable-legacy=on,disable-modern=off,queue-size=64,num-queues=1,request-merging=off,backend_defaults=off,discard=off,write-zeroes=off,event_idx=off,indirect_desc=off,queue_reset=off$IOMMU_DEV_EXTRA \
         -device virtio-blk-pci,bus=pcie.0,addr=0x8,drive=x2,serial=vltpdev,disable-legacy=on,disable-modern=off,queue-size=64,num-queues=1,request-merging=off,backend_defaults=off,discard=off,write-zeroes=off,event_idx=off,indirect_desc=off,queue_reset=off$IOMMU_DEV_EXTRA \
+        -device virtio-blk-pci,bus=pcie.0,addr=0x9,drive=x3,serial=vsquashfs,disable-legacy=on,disable-modern=off,queue-size=64,num-queues=1,request-merging=off,backend_defaults=off,discard=off,write-zeroes=off,event_idx=off,indirect_desc=off,queue_reset=off$IOMMU_DEV_EXTRA \
         -object rng-random,id=rng0,filename=/dev/urandom \
-        -device virtio-rng-pci,bus=pcie.0,addr=0x9,disable-legacy=on,disable-modern=off,rng=rng0,event_idx=off,indirect_desc=off,queue_reset=off$IOMMU_DEV_EXTRA \
+        -device virtio-rng-pci,bus=pcie.0,addr=0xa,disable-legacy=on,disable-modern=off,rng=rng0,event_idx=off,indirect_desc=off,queue_reset=off$IOMMU_DEV_EXTRA \
         -device virtio-net-pci,netdev=net01,disable-legacy=on,disable-modern=off$VIRTIO_NET_FEATURES$IOMMU_DEV_EXTRA \
         -device virtio-serial-pci,disable-legacy=on,disable-modern=off$IOMMU_DEV_EXTRA \
         -drive if=none,format=raw,id=nvme0n1,file=./test/initramfs/build/nvme0n1.img \
@@ -208,13 +215,13 @@ fi
 if [ "$ATTACH_XFSTESTS_IMAGES" = "true" ]; then
     if [ "$1" = "microvm" ]; then
         QEMU_ARGS="$QEMU_ARGS \
-        -device virtio-blk-device,drive=x3,serial=vxfstest \
-        -device virtio-blk-device,drive=x4,serial=vxfsscratch \
+        -device virtio-blk-device,drive=x4,serial=vxfstest \
+        -device virtio-blk-device,drive=x5,serial=vxfsscratch \
     "
     else
         QEMU_ARGS="$QEMU_ARGS \
-        -device virtio-blk-pci,bus=pcie.0,addr=0xa,drive=x3,serial=vxfstest,disable-legacy=on,disable-modern=off,queue-size=64,num-queues=1,request-merging=off,backend_defaults=off,discard=off,write-zeroes=off,event_idx=off,indirect_desc=off,queue_reset=off$IOMMU_DEV_EXTRA \
-        -device virtio-blk-pci,bus=pcie.0,addr=0xb,drive=x4,serial=vxfsscratch,disable-legacy=on,disable-modern=off,queue-size=64,num-queues=1,request-merging=off,backend_defaults=off,discard=off,write-zeroes=off,event_idx=off,indirect_desc=off,queue_reset=off$IOMMU_DEV_EXTRA \
+        -device virtio-blk-pci,bus=pcie.0,addr=0xc,drive=x4,serial=vxfstest,disable-legacy=on,disable-modern=off,queue-size=64,num-queues=1,request-merging=off,backend_defaults=off,discard=off,write-zeroes=off,event_idx=off,indirect_desc=off,queue_reset=off$IOMMU_DEV_EXTRA \
+        -device virtio-blk-pci,bus=pcie.0,addr=0xd,drive=x5,serial=vxfsscratch,disable-legacy=on,disable-modern=off,queue-size=64,num-queues=1,request-merging=off,backend_defaults=off,discard=off,write-zeroes=off,event_idx=off,indirect_desc=off,queue_reset=off$IOMMU_DEV_EXTRA \
     "
     fi
 fi

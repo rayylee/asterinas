@@ -10,6 +10,7 @@ SUBDIRS := \
 	overlayfs \
 	procfs \
 	pseudofs \
+	squashfs \
 	statx \
 	symlink \
 	sync \
