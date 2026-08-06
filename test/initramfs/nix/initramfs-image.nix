@@ -11,6 +11,7 @@ stdenvNoCC.mkDerivation {
     chmod -R 0755 test
     chmod -R 0755 ext2
     chmod -R 0755 exfat
+    chmod -R 0755 squashfs
     chmod -R 0755 var
     chmod -R 1777 tmp
 
