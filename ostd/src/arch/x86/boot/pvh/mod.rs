@@ -10,6 +10,7 @@
 //!
 //! Reference: <https://xenbits.xen.org/docs/unstable/misc/pvh.html>
 
+#[cfg(feature = "pvh_boot")]
 use core::arch::global_asm;
 
 use crate::{
@@ -20,6 +21,7 @@ use crate::{
     mm::{Paddr, kspace::paddr_to_vaddr},
 };
 
+#[cfg(feature = "pvh_boot")]
 global_asm!(include_str!("note.S"));
 
 /// The magic value of [`HvmStartInfo::magic`], which is "xEn3" in ASCII.
@@ -135,14 +137,18 @@ fn parse_memory_regions(start_info: &HvmStartInfo) -> MemoryRegionArray {
             )
         };
 
+        let acpi_root_table_address = super::find_acpi_root_table_address();
+
         for entry in memmap {
-            regions
-                .push(MemoryRegion::new(
-                    entry.addr.try_into().unwrap(),
-                    entry.size.try_into().unwrap(),
-                    parse_memory_region_type(entry.typ),
-                ))
-                .unwrap();
+            let base = entry.addr.try_into().unwrap();
+            let len = entry.size.try_into().unwrap();
+            let typ = super::effective_region_type(
+                parse_memory_region_type(entry.typ),
+                base,
+                len,
+                acpi_root_table_address,
+            );
+            regions.push(MemoryRegion::new(base, len, typ)).unwrap();
         }
     }
 
