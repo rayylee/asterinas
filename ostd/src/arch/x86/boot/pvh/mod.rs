@@ -135,14 +135,25 @@ fn parse_memory_regions(start_info: &HvmStartInfo) -> MemoryRegionArray {
             )
         };
 
+        // The VMM may report the region containing the ACPI root table as
+        // reserved. QEMU's PVH loader, for instance, places the ACPI tables in
+        // the reserved area at the top of the low memory and leaves
+        // `rsdp_paddr` zero. The region is promoted so that the tables stay
+        // covered by the linear mapping (see `effective_region_type`).
+        let acpi_root_table_address = super::find_acpi_root_table_address(
+            (start_info.rsdp_paddr != 0).then_some(start_info.rsdp_paddr),
+        );
+
         for entry in memmap {
-            regions
-                .push(MemoryRegion::new(
-                    entry.addr.try_into().unwrap(),
-                    entry.size.try_into().unwrap(),
-                    parse_memory_region_type(entry.typ),
-                ))
-                .unwrap();
+            let base = entry.addr.try_into().unwrap();
+            let len = entry.size.try_into().unwrap();
+            let typ = super::effective_region_type(
+                parse_memory_region_type(entry.typ),
+                base,
+                len,
+                acpi_root_table_address,
+            );
+            regions.push(MemoryRegion::new(base, len, typ)).unwrap();
         }
     }
 

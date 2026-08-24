@@ -19,7 +19,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Build kernel
-        run: make kernel BOOT_METHOD=direct-elf
+        run: make kernel BOOT_METHOD=direct-elf BOOT_PROTOCOL=pvh
 
       - name: Run boot test with Firecracker
         shell: bash

@@ -1,11 +1,9 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use core::{arch::global_asm, num::NonZeroUsize};
-
-use acpi::rsdp::Rsdp;
+#[cfg(feature = "multiboot")]
+use core::arch::global_asm;
 
 use crate::{
-    arch::kernel::acpi::AcpiMemoryHandler,
     boot::{
         BootloaderAcpiArg, BootloaderFramebufferArg,
         memory_region::{MemoryRegion, MemoryRegionArray, MemoryRegionType},
@@ -13,6 +11,11 @@ use crate::{
     mm::{Paddr, kspace::paddr_to_vaddr},
 };
 
+// The Multiboot v1 header is only embedded if the `multiboot` feature is
+// enabled. Loaders that probe for the Multiboot v1 magic before the PVH ELF
+// note (e.g., QEMU's direct kernel loader) would boot the image via Multiboot
+// v1 instead of PVH, so PVH-bootable images must not contain the header.
+#[cfg(feature = "multiboot")]
 global_asm!(include_str!("header.S"));
 
 const MULTIBOOT_ENTRY_MAGIC: u32 = 0x2BADB002;
@@ -88,24 +91,14 @@ fn parse_memory_regions(mb1_info: &MultibootLegacyInfo) -> MemoryRegionArray {
     // region may live above the highest usable physical memory region when the
     // total memory size is below 2G. We therefore mark it as reclaimable to
     // include it in the linear mappings and allow access.
-    //
-    // FIXME: The ACPI specification does not guarantee that all ACPI tables
-    // are contiguous and do not cross region boundaries. See ACPI 6.4, Section
-    // 5.1, "Overview of the System Description Table Architecture".
-    // A full ACPI table graph scan may eventually be unavoidable.
-    let acpi_root_table_address = find_acpi_root_table_address();
+    let acpi_root_table_address = super::find_acpi_root_table_address(None);
 
     // Add the regions in the multiboot protocol.
     for entry in mb1_info.get_memory_map() {
         let base = entry.base_addr().try_into().unwrap();
         let len = entry.length().try_into().unwrap();
-        let mut typ = entry.memory_type();
-        if typ == MemoryRegionType::Reserved
-            && acpi_root_table_address
-                .is_some_and(|address| (base..(base + len)).contains(&address.get()))
-        {
-            typ = MemoryRegionType::Reclaimable;
-        }
+        let typ =
+            super::effective_region_type(entry.memory_type(), base, len, acpi_root_table_address);
 
         let region = MemoryRegion::new(base, len, typ);
         regions.push(region).unwrap();
@@ -142,23 +135,6 @@ fn parse_memory_regions(mb1_info: &MultibootLegacyInfo) -> MemoryRegionArray {
     }
 
     regions.into_non_overlapping()
-}
-
-fn find_acpi_root_table_address() -> Option<NonZeroUsize> {
-    // Multiboot v1 is BIOS-oriented: its entry state and boot information are
-    // based on the legacy PC BIOS model, and it has no standard EFI System
-    // Table field. So we use the BIOS RSDP scan as the legacy fallback.
-    //
-    // SAFETY: The Multiboot v1 entry path is treated as BIOS-compatible.
-    let Ok(rsdp) = (unsafe { Rsdp::search_for_on_bios(AcpiMemoryHandler {}) }) else {
-        return None;
-    };
-
-    if rsdp.revision() == 0 {
-        NonZeroUsize::new(rsdp.rsdt_address() as usize)
-    } else {
-        NonZeroUsize::new(rsdp.xsdt_address() as usize)
-    }
 }
 
 /// Representation of Multiboot Information according to specification.

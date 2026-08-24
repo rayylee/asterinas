@@ -31,6 +31,8 @@ args = "$(./tools/qemu_args.sh test)"
 
 [scheme."microvm"]
 boot.method = "direct-elf"
+grub.boot_protocol = "multiboot"
+build.features = ["multiboot"]
 build.strip_elf = true
 qemu.args = "$(./tools/qemu_args.sh microvm)"
 
